@@ -1,0 +1,103 @@
+### 1. Health Check
+GET http://127.0.0.1:8000/health
+
+### 2. Ingest Event 1: Login from Unknown Device
+POST http://127.0.0.1:8000/api/events
+Content-Type: application/json
+
+{
+  "user_id": "U001",
+  "device_id": "unknown_macbook_99",
+  "session_id": "hackathon_session_01",
+  "event_type": "login",
+  "metadata": {
+    "is_new_device": true,
+    "ip": "203.0.113.45"
+  }
+}
+
+### 3. Ingest Event 2: Sensitive API Access in Same Session
+POST http://127.0.0.1:8000/api/events
+Content-Type: application/json
+
+{
+  "user_id": "U001",
+  "device_id": "unknown_macbook_99",
+  "session_id": "hackathon_session_01",
+  "event_type": "api_access",
+  "resource": "/api/customer-data/pii/export",
+  "metadata": {
+    "records_requested": 5000
+  }
+}
+
+### 4. Ingest Event 3: AI Agent Invocation with Restricted Tool
+POST http://127.0.0.1:8000/api/events
+Content-Type: application/json
+
+{
+  "user_id": "U001",
+  "session_id": "hackathon_session_01",
+  "agent_id": "agent_copilot",
+  "tool_name": "raw_sql_exec",
+  "event_type": "tool_invocation",
+  "resource": "/database/internal_records",
+  "metadata": {
+    "query": "SELECT * FROM users WHERE role='admin'"
+  }
+}
+
+### 5. Intelligence Layer: Analyze Event Directly
+POST http://127.0.0.1:8000/api/analyze
+Content-Type: application/json
+
+{
+  "user_id": "U002",
+  "device_id": "unknown_terminal",
+  "event_type": "privilege_change",
+  "resource": "/api/admin/roles",
+  "metadata": {
+    "privilege_escalation": true,
+    "role": "admin"
+  }
+}
+
+### 6. Intelligence Layer: Analyze Stored Event by ID
+POST http://127.0.0.1:8000/api/analyze
+Content-Type: application/json
+
+{
+  "event_id": "YOUR_EVENT_UUID_HERE"
+}
+
+### 7. n8n Automation Entrypoint: Process Event & Branch
+POST http://127.0.0.1:8000/api/n8n/process-event
+Content-Type: application/json
+
+{
+  "user_id": "U_ATTACKER_01",
+  "device_id": "unknown_kali_box",
+  "session_id": "sess_n8n_demo",
+  "event_type": "tool_invocation",
+  "agent_id": "agent_copilot",
+  "tool_name": "raw_sql_exec",
+  "resource": "/api/customer-data/export",
+  "metadata": {
+    "is_new_device": true,
+    "privilege_escalation": true
+  }
+}
+
+### 8. List Correlated Incidents
+GET http://127.0.0.1:8000/api/incidents
+
+### 9. List Security Alerts
+GET http://127.0.0.1:8000/api/alerts
+
+### 10. Update Security Alert Status (e.g. Acknowledge / Resolve)
+PATCH http://127.0.0.1:8000/api/alerts/YOUR_ALERT_ID_HERE
+Content-Type: application/json
+
+{
+  "status": "acknowledged"
+}

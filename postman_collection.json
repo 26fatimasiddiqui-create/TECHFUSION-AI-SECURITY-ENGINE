@@ -1,0 +1,123 @@
+{
+  "info": {
+    "name": "PS-8 Security Monitoring & Risk Analysis API",
+    "description": "Collection of sample security events and analysis requests for the PS-8 prototype backend.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://127.0.0.1:8000/health",
+          "protocol": "http",
+          "host": ["127", "0", "0", "1"],
+          "port": "8000",
+          "path": ["health"]
+        }
+      }
+    },
+    {
+      "name": "Step 1 - Login Unknown Device",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"user_id\": \"U001\",\n  \"device_id\": \"unknown_macbook_99\",\n  \"session_id\": \"hackathon_session_01\",\n  \"event_type\": \"login\",\n  \"metadata\": {\n    \"is_new_device\": true,\n    \"ip\": \"203.0.113.45\"\n  }\n}"
+        },
+        "url": {
+          "raw": "http://127.0.0.1:8000/api/events",
+          "protocol": "http",
+          "host": ["127", "0", "0", "1"],
+          "port": "8000",
+          "path": ["api", "events"]
+        }
+      }
+    },
+    {
+      "name": "Step 2 - Sensitive API Access",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"user_id\": \"U001\",\n  \"device_id\": \"unknown_macbook_99\",\n  \"session_id\": \"hackathon_session_01\",\n  \"event_type\": \"api_access\",\n  \"resource\": \"/api/customer-data/pii/export\",\n  \"metadata\": {\n    \"records_requested\": 5000\n  }\n}"
+        },
+        "url": {
+          "raw": "http://127.0.0.1:8000/api/events",
+          "protocol": "http",
+          "host": ["127", "0", "0", "1"],
+          "port": "8000",
+          "path": ["api", "events"]
+        }
+      }
+    },
+    {
+      "name": "Step 3 - AI Agent Restricted Tool Invocation",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"user_id\": \"U001\",\n  \"session_id\": \"hackathon_session_01\",\n  \"agent_id\": \"agent_copilot\",\n  \"tool_name\": \"raw_sql_exec\",\n  \"event_type\": \"tool_invocation\",\n  \"resource\": \"/database/internal_records\",\n  \"metadata\": {\n    \"query\": \"SELECT * FROM users WHERE role='admin'\"\n  }\n}"
+        },
+        "url": {
+          "raw": "http://127.0.0.1:8000/api/events",
+          "protocol": "http",
+          "host": ["127", "0", "0", "1"],
+          "port": "8000",
+          "path": ["api", "events"]
+        }
+      }
+    },
+    {
+      "name": "On-Demand Analyze (Dry-run)",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"user_id\": \"U002\",\n  \"device_id\": \"unknown_terminal\",\n  \"event_type\": \"privilege_change\",\n  \"resource\": \"/api/admin/roles\",\n  \"metadata\": {\n    \"privilege_escalation\": true,\n    \"role\": \"admin\"\n  }\n}"
+        },
+        "url": {
+          "raw": "http://127.0.0.1:8000/api/analyze",
+          "protocol": "http",
+          "host": ["127", "0", "0", "1"],
+          "port": "8000",
+          "path": ["api", "analyze"]
+        }
+      }
+    },
+    {
+      "name": "Get Correlated Incidents",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://127.0.0.1:8000/api/incidents",
+          "protocol": "http",
+          "host": ["127", "0", "0", "1"],
+          "port": "8000",
+          "path": ["api", "incidents"]
+        }
+      }
+    },
+    {
+      "name": "Get Security Alerts",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://127.0.0.1:8000/api/alerts",
+          "protocol": "http",
+          "host": ["127", "0", "0", "1"],
+          "port": "8000",
+          "path": ["api", "alerts"]
+        }
+      }
+    }
+  ]
+}
