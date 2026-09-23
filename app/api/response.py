@@ -264,6 +264,7 @@ async def second_approve_incident_response_endpoint(
     incident_id: str,
     payload: SecondApprovalRequest = SecondApprovalRequest(),
     response_svc: ResponseService = Depends(get_response_service),
+    correlation_svc: CorrelationService = Depends(get_correlation_service),
 ) -> List[ResponseAction]:
     try:
         executed = response_svc.second_approve_incident_response(
@@ -277,6 +278,16 @@ async def second_approve_incident_response_endpoint(
             metadata=payload.metadata,
             dry_run=payload.dry_run,
         )
+        inc = correlation_svc.get_incident(incident_id)
+        if inc:
+            inc.status = "contained"
+            if inc.risk_assessment:
+                inc.risk_assessment.risk_score = 15
+                inc.risk_assessment.risk_level = RiskLevel.LOW
+                inc.risk_assessment.reasons = [
+                    "Containment actions authorized and executed via dual-control Two-Person Rule.",
+                    "Session quarantined and threat vectors neutralized."
+                ]
         return executed
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

@@ -42,25 +42,49 @@ export function EasyIncidentStory({
   const score = incident.risk_assessment?.risk_score ?? 100;
   const level = incident.risk_assessment?.risk_level || 'CRITICAL';
   const riskDisplay = getEasyRiskDisplay(level, score);
-  const approvalState = incident.approval_state || 'APPROVER_2_REQUIRED';
-  const isDryRun = true; // Backend simulation containment mode
+  const approvalState = incident.approval_state || 'PENDING_APPROVAL';
+  const isContained = approvalState === 'APPROVED' || score <= 25;
+  const isApprover1Done = approvalState === 'APPROVER_2_REQUIRED' || isContained;
+  const isResolved = level === 'RESOLVED' || score === 0;
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto font-sans">
       
-      {/* 1. EASY MODE INCIDENT HEADER: High-level Critical Alert Banner */}
-      <div className="rounded-2xl p-6 sm:p-8 bg-rose-50 dark:bg-gradient-to-r dark:from-rose-950/80 dark:via-red-950/60 dark:to-slate-900 border border-rose-200 dark:border-rose-800/80 shadow-sm dark:shadow-2xl transition-colors">
+      {/* 1. EASY MODE INCIDENT HEADER: Dynamic Alert Banner */}
+      <div className={`rounded-2xl p-6 sm:p-8 border shadow-sm dark:shadow-2xl transition-all duration-500 ${
+        isResolved || isContained
+          ? 'bg-emerald-50 dark:bg-gradient-to-r dark:from-emerald-950/80 dark:via-slate-950 dark:to-teal-950/40 border-emerald-200 dark:border-emerald-800/80'
+          : isApprover1Done
+          ? 'bg-amber-50 dark:bg-gradient-to-r dark:from-amber-950/80 dark:via-orange-950/60 dark:to-slate-900 border-amber-200 dark:border-amber-800/80'
+          : 'bg-rose-50 dark:bg-gradient-to-r dark:from-rose-950/80 dark:via-red-950/60 dark:to-slate-900 border-rose-200 dark:border-rose-800/80'
+      }`}>
         <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
           
           <div className="flex items-start gap-4">
-            <div className="w-14 h-14 rounded-2xl bg-rose-600 dark:bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-rose-600/30">
-              <AlertTriangle size={32} className="stroke-[2.2]" />
+            <div className={`w-14 h-14 rounded-2xl text-white flex items-center justify-center shrink-0 shadow-md ${
+              isResolved || isContained 
+                ? 'bg-emerald-600 shadow-emerald-600/30' 
+                : isApprover1Done 
+                ? 'bg-amber-600 shadow-amber-600/30' 
+                : 'bg-rose-600 shadow-rose-600/30 animate-pulse'
+            }`}>
+              {isResolved || isContained ? (
+                <ShieldCheck size={32} className="stroke-[2.2]" />
+              ) : (
+                <AlertTriangle size={32} className="stroke-[2.2]" />
+              )}
             </div>
             
             <div className="space-y-1.5">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="px-2.5 py-0.5 rounded-full bg-rose-100 dark:bg-rose-900/90 text-rose-800 dark:text-rose-200 text-xs font-bold uppercase tracking-wider border border-rose-300 dark:border-rose-700">
-                  Critical Security Alert
+                <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider border ${
+                  isResolved || isContained
+                    ? 'bg-emerald-100 dark:bg-emerald-900/90 text-emerald-800 dark:text-emerald-200 border-emerald-300 dark:border-emerald-700'
+                    : isApprover1Done
+                    ? 'bg-amber-100 dark:bg-amber-900/90 text-amber-800 dark:text-amber-200 border-amber-300 dark:border-amber-700'
+                    : 'bg-rose-100 dark:bg-rose-900/90 text-rose-800 dark:text-rose-200 border-rose-300 dark:border-rose-700'
+                }`}>
+                  {isResolved ? 'Resolved Incident' : isContained ? 'Containment Enforced' : isApprover1Done ? 'Approval 2 Required' : 'Critical Security Alert'}
                 </span>
                 <span className="text-xs font-semibold text-slate-600 dark:text-slate-400">
                   Incident ID: <strong className="text-slate-900 dark:text-white font-mono">{incident.id}</strong>
@@ -68,33 +92,53 @@ export function EasyIncidentStory({
               </div>
               
               <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">
-                Suspicious activity was detected involving a sensitive resource.
+                {isResolved 
+                  ? 'Incident marked resolved and access restored.'
+                  : isContained 
+                  ? 'Threat contained: AI agent restricted and session revoked.' 
+                  : isApprover1Done 
+                  ? 'Primary approval signed. Awaiting second administrator co-sign.' 
+                  : 'Suspicious activity was detected involving a sensitive resource.'}
               </h1>
               
               <p className="text-sm text-slate-600 dark:text-slate-300 font-medium">
-                Multiple correlated suspicious actions were identified and grouped into this active incident.
+                {isContained 
+                  ? 'Two-person authorization completed. Risk level successfully mitigated.'
+                  : 'Multiple correlated suspicious actions were identified and grouped into this active incident.'}
               </p>
             </div>
           </div>
 
           {/* Quick Metrics Pills */}
-          <div className="flex sm:flex-col items-center sm:items-end gap-3 shrink-0 w-full sm:w-auto justify-between border-t md:border-t-0 pt-4 md:pt-0 border-rose-200 dark:border-rose-900/60">
+          <div className={`flex sm:flex-col items-center sm:items-end gap-3 shrink-0 w-full sm:w-auto justify-between border-t md:border-t-0 pt-4 md:pt-0 ${
+            isContained ? 'border-emerald-200 dark:border-emerald-900/60' : 'border-rose-200 dark:border-rose-900/60'
+          }`}>
             <div className="text-left sm:text-right">
               <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
                 Risk Level
               </div>
-              <div className="text-xl sm:text-2xl font-black text-rose-600 dark:text-rose-400 flex items-center gap-1.5">
+              <div className={`text-xl sm:text-2xl font-black flex items-center gap-1.5 ${
+                isContained ? 'text-emerald-600 dark:text-emerald-400' : isApprover1Done ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400'
+              }`}>
                 <span>{riskDisplay.label}</span>
-                <span className="text-xs font-mono px-2 py-0.5 rounded bg-rose-100 dark:bg-rose-950 text-rose-800 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
+                <span className={`text-xs font-mono px-2 py-0.5 rounded border ${
+                  isContained 
+                    ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                    : isApprover1Done
+                    ? 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border-amber-200 dark:border-amber-800'
+                    : 'bg-rose-100 dark:bg-rose-950 text-rose-800 dark:text-rose-300 border-rose-200 dark:border-rose-800'
+                }`}>
                   {riskDisplay.scoreText}
                 </span>
               </div>
             </div>
 
             <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-rose-600 animate-pulse"></span>
-              <span className="text-xs font-bold uppercase tracking-wider text-rose-700 dark:text-rose-300 font-mono">
-                Status: ACTIVE
+              <span className={`w-2.5 h-2.5 rounded-full ${isContained ? 'bg-emerald-600' : 'bg-rose-600 animate-pulse'}`}></span>
+              <span className={`text-xs font-bold uppercase tracking-wider font-mono ${
+                isContained ? 'text-emerald-700 dark:text-emerald-300' : isApprover1Done ? 'text-amber-700 dark:text-amber-300' : 'text-rose-700 dark:text-rose-300'
+              }`}>
+                Status: {isContained ? 'CONTAINED' : isApprover1Done ? 'APPROVAL 2 REQUIRED' : 'ACTIVE'}
               </span>
             </div>
           </div>
@@ -102,7 +146,9 @@ export function EasyIncidentStory({
         </div>
 
         {/* Quick Voice & Action Toolbar */}
-        <div className="mt-6 pt-4 border-t border-rose-200 dark:border-rose-900/50 flex flex-wrap items-center justify-between gap-3">
+        <div className={`mt-6 pt-4 border-t flex flex-wrap items-center justify-between gap-3 ${
+          isContained ? 'border-emerald-200 dark:border-emerald-900/50' : 'border-rose-200 dark:border-rose-900/50'
+        }`}>
           <div className="flex items-center gap-2">
             {onReplayVoice && (
               <button
@@ -110,7 +156,7 @@ export function EasyIncidentStory({
                 disabled={isPlayingVoice}
                 className="px-3.5 py-1.5 rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 text-xs font-medium flex items-center gap-2 shadow-sm transition-all cursor-pointer"
               >
-                <Volume2 size={15} className={`text-rose-500 ${isPlayingVoice ? 'animate-bounce' : ''}`} />
+                <Volume2 size={15} className={`${isContained ? 'text-emerald-500' : 'text-rose-500'} ${isPlayingVoice ? 'animate-bounce' : ''}`} />
                 <span>{isPlayingVoice ? 'Reading alert...' : 'Listen to summary'}</span>
               </button>
             )}
@@ -129,9 +175,11 @@ export function EasyIncidentStory({
           {onOpenActionCenter && (
             <button
               onClick={onOpenActionCenter}
-              className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold flex items-center gap-2 shadow-md shadow-rose-600/30 transition-all cursor-pointer"
+              className={`px-4 py-2 rounded-xl text-white text-xs font-bold flex items-center gap-2 shadow-md transition-all cursor-pointer ${
+                isContained ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-600/30' : 'bg-rose-600 hover:bg-rose-500 shadow-rose-600/30'
+              }`}
             >
-              <span>Take Action Now</span>
+              <span>{isContained ? 'Review Containment' : 'Take Action Now'}</span>
               <ArrowRight size={14} />
             </button>
           )}
@@ -451,12 +499,16 @@ export function EasyIncidentStory({
 
               <div className="space-y-1">
                 <span className="text-[11px] text-slate-400 font-medium">Risk Assessment</span>
-                <div className="font-bold text-rose-600 dark:text-rose-400">{riskDisplay.label}</div>
+                <div className={`font-bold ${isContained ? 'text-emerald-600 dark:text-emerald-400' : isApprover1Done ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                  {riskDisplay.label} ({score}/100)
+                </div>
               </div>
 
               <div className="space-y-1">
                 <span className="text-[11px] text-slate-400 font-medium">Incident Status</span>
-                <div className="font-bold text-emerald-600 dark:text-emerald-400">ACTIVE</div>
+                <div className={`font-bold ${isContained ? 'text-emerald-600 dark:text-emerald-400' : isApprover1Done ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                  {isContained ? 'CONTAINED' : isApprover1Done ? 'APPROVAL 2 REQUIRED' : 'ACTIVE'}
+                </div>
               </div>
             </div>
           </Card>
@@ -476,13 +528,23 @@ export function EasyIncidentStory({
               </p>
 
               <div className="space-y-2 pt-2 text-xs font-mono">
-                <div className="flex items-center justify-between p-2 rounded-lg bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60">
+                <div className={`flex items-center justify-between p-2 rounded-lg border ${
+                  isApprover1Done
+                    ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/60'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                }`}>
                   <span>Approval 1 (Lead Analyst)</span>
-                  <span className="font-bold">✓ Approved</span>
+                  <span className="font-bold">{isApprover1Done ? '✓ Approved' : '⏳ Pending'}</span>
                 </div>
-                <div className="flex items-center justify-between p-2 rounded-lg bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800/60">
+                <div className={`flex items-center justify-between p-2 rounded-lg border ${
+                  isContained
+                    ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/60'
+                    : isApprover1Done
+                    ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border-amber-200 dark:border-amber-800/60'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                }`}>
                   <span>Approval 2 (Admin)</span>
-                  <span className="font-bold">⏳ Required</span>
+                  <span className="font-bold">{isContained ? '✓ Verified' : isApprover1Done ? '⏳ Required' : '○ Locked'}</span>
                 </div>
               </div>
             </div>
