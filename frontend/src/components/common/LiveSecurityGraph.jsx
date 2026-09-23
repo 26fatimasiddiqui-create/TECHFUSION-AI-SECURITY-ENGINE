@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   User, 
   Monitor, 
@@ -12,143 +12,409 @@ import {
   ChevronRight,
   Sparkles,
   CheckCircle2,
-  Info
+  Info,
+  Laptop
 } from 'lucide-react';
 
+// Default baseline nodes used if events are not yet loaded
+const DEFAULT_NODES = {
+  a_verma: {
+    id: 'a_verma',
+    name: 'A. Verma',
+    role: 'Employee',
+    status: 'normal',
+    type: 'user',
+    x: 70,
+    y: 65,
+    r: 24,
+    icon: User,
+    details: 'Standard employee authentication from verified corporate hardware. Normal baseline profile.',
+  },
+  j_singh: {
+    id: 'j_singh',
+    name: 'J. Singh',
+    role: 'Analyst',
+    status: 'malicious',
+    type: 'user',
+    x: 70,
+    y: 180,
+    r: 24,
+    icon: User,
+    details: 'Unusual login detected outside normal working hours from an unverified geographic location.',
+  },
+  r_khan: {
+    id: 'r_khan',
+    name: 'R. Khan',
+    role: 'Contractor',
+    status: 'normal',
+    type: 'user',
+    x: 70,
+    y: 295,
+    r: 24,
+    icon: User,
+    details: 'Verified contractor profile with standard scoped API tokens.',
+  },
+  laptop_win: {
+    id: 'laptop_win',
+    name: 'Laptop',
+    role: 'Windows',
+    status: 'normal',
+    type: 'device',
+    x: 235,
+    y: 95,
+    r: 24,
+    icon: Monitor,
+    details: 'Managed corporate workstation D_CORP_WIN_11. Fully compliant endpoint health.',
+  },
+  unknown_device: {
+    id: 'unknown_device',
+    name: 'Unknown Device',
+    role: 'Linux',
+    status: 'malicious',
+    type: 'device',
+    x: 235,
+    y: 265,
+    r: 24,
+    icon: Laptop,
+    details: 'Unrecognized Kali Linux box connecting via external IP 203.0.113.195 with forged headers.',
+  },
+  hr_agent: {
+    id: 'hr_agent',
+    name: 'HR_Agent',
+    role: 'AI Agent',
+    status: 'malicious',
+    type: 'agent',
+    x: 410,
+    y: 180,
+    r: 28,
+    icon: Bot,
+    details: 'Autonomous LLM agent copilot prompted with privileged jailbreak to dump customer credentials.',
+  },
+  hr_api: {
+    id: 'hr_api',
+    name: 'HR API',
+    role: 'Gateway',
+    status: 'suspicious',
+    type: 'api',
+    x: 580,
+    y: 95,
+    r: 24,
+    icon: NetworkIcon,
+    details: 'Standard HR REST gateway. High call frequency observed from autonomous orchestrator.',
+  },
+  payroll_api: {
+    id: 'payroll_api',
+    name: 'Payroll API',
+    role: 'Privileged',
+    status: 'malicious',
+    type: 'api',
+    x: 580,
+    y: 265,
+    r: 24,
+    icon: Shield,
+    details: 'Financial payroll endpoint invoked for bulk export bypassing standard rate limits.',
+  },
+  employee_db: {
+    id: 'employee_db',
+    name: 'Employee DB',
+    role: 'PostgreSQL',
+    status: 'normal',
+    type: 'database',
+    x: 755,
+    y: 95,
+    r: 24,
+    icon: Database,
+    details: 'Internal staff directory PostgreSQL cluster. Standard read operations.',
+  },
+  customer_db: {
+    id: 'customer_db',
+    name: 'Customer DB',
+    role: 'PII Store',
+    status: 'malicious',
+    type: 'database',
+    x: 755,
+    y: 265,
+    r: 24,
+    icon: Database,
+    details: 'Sensitive customer PII & credential database targeted for bulk table exfiltration.',
+  },
+};
+
+const DEFAULT_PATHS = [
+  { d: "M 94 65 C 165 65, 165 95, 211 95", color: "#10b981", strokeWidth: 2, filter: "url(#glow-green)" },
+  { d: "M 94 295 C 165 295, 165 95, 211 95", color: "#10b981", strokeWidth: 1.5, opacity: 0.4 },
+  { d: "M 94 180 C 165 180, 165 265, 211 265", color: "#f43f5e", strokeWidth: 2.5, filter: "url(#glow-red)", markerEnd: "url(#arrow-red)" },
+  { d: "M 259 95 L 556 95", color: "#10b981", strokeWidth: 2, filter: "url(#glow-green)" },
+  { d: "M 259 95 C 320 95, 320 180, 382 180", color: "#10b981", strokeWidth: 1.8, opacity: 0.6 },
+  { d: "M 259 265 C 320 265, 320 180, 382 180", color: "#f43f5e", strokeWidth: 2.5, strokeDasharray: "6 4", filter: "url(#glow-red)", markerEnd: "url(#arrow-red)", animate: true },
+  { d: "M 438 180 C 495 180, 495 95, 556 95", color: "#f59e0b", strokeWidth: 2, filter: "url(#glow-amber)", markerEnd: "url(#arrow-amber)" },
+  { d: "M 438 180 C 495 180, 495 265, 556 265", color: "#f43f5e", strokeWidth: 2.5, strokeDasharray: "6 4", filter: "url(#glow-red)", markerEnd: "url(#arrow-red)", animate: true },
+  { d: "M 604 95 L 731 95", color: "#10b981", strokeWidth: 2, filter: "url(#glow-green)", markerEnd: "url(#arrow-green)" },
+  { d: "M 604 265 L 731 265", color: "#f43f5e", strokeWidth: 2.5, strokeDasharray: "6 4", filter: "url(#glow-red)", markerEnd: "url(#arrow-red)", animate: true },
+  { d: "M 580 119 L 580 241", color: "#f59e0b", strokeWidth: 1.8, strokeDasharray: "4 3", opacity: 0.6 },
+];
+
 export function LiveSecurityGraph({ 
+  events = [],
   onInvestigate,
   onSelectNode,
   className = "" 
 }) {
-  const [selectedNode, setSelectedNode] = useState('j_singh');
+  const [selectedNodeId, setSelectedNodeId] = useState(null);
 
-  // Exact 5-Column Grid Node Definitions with Amber for Suspicious
-  const nodes = {
-    a_verma: {
-      id: 'a_verma',
-      name: 'A. Verma',
-      role: 'Employee',
-      status: 'normal',
-      type: 'user',
-      x: 70,
-      y: 65,
-      r: 24,
-      icon: User,
-      details: 'Standard employee authentication from verified corporate hardware. Normal baseline profile.',
-    },
-    j_singh: {
-      id: 'j_singh',
-      name: 'J. Singh',
-      role: 'Analyst',
-      status: 'malicious',
-      type: 'user',
-      x: 70,
-      y: 180,
-      r: 24,
-      icon: User,
-      details: 'Unusual login detected outside normal working hours from an unverified geographic location.',
-    },
-    r_khan: {
-      id: 'r_khan',
-      name: 'R. Khan',
-      role: 'Contractor',
-      status: 'normal',
-      type: 'user',
-      x: 70,
-      y: 295,
-      r: 24,
-      icon: User,
-      details: 'Verified contractor profile with standard scoped API tokens.',
-    },
-    laptop_win: {
-      id: 'laptop_win',
-      name: 'Laptop',
-      role: 'Windows',
-      status: 'normal',
-      type: 'device',
-      x: 235,
-      y: 95,
-      r: 24,
-      icon: Monitor,
-      details: 'Managed corporate workstation D_CORP_WIN_11. Fully compliant endpoint health.',
-    },
-    unknown_device: {
-      id: 'unknown_device',
-      name: 'Unknown Device',
-      role: 'Linux',
-      status: 'malicious',
-      type: 'device',
-      x: 235,
-      y: 265,
-      r: 24,
-      icon: Bot,
-      details: 'Unrecognized Kali Linux box connecting via external IP 203.0.113.195 with forged headers.',
-    },
-    hr_agent: {
-      id: 'hr_agent',
-      name: 'HR_Agent',
-      role: 'AI Agent',
-      status: 'malicious',
-      type: 'agent',
-      x: 410,
-      y: 180,
-      r: 28,
-      icon: Bot,
-      details: 'Autonomous LLM agent copilot prompted with privileged jailbreak to dump customer credentials.',
-    },
-    hr_api: {
-      id: 'hr_api',
-      name: 'HR API',
-      role: 'Gateway',
-      status: 'suspicious', // Yellow / Amber
-      type: 'api',
-      x: 580,
-      y: 95,
-      r: 24,
-      icon: NetworkIcon,
-      details: 'Standard HR REST gateway. High call frequency observed from autonomous orchestrator.',
-    },
-    payroll_api: {
-      id: 'payroll_api',
-      name: 'Payroll API',
-      role: 'Privileged',
-      status: 'malicious',
-      type: 'api',
-      x: 580,
-      y: 265,
-      r: 24,
-      icon: Shield,
-      details: 'Financial payroll endpoint invoked for bulk export bypassing standard rate limits.',
-    },
-    employee_db: {
-      id: 'employee_db',
-      name: 'Employee DB',
-      role: 'PostgreSQL',
-      status: 'normal',
-      type: 'database',
-      x: 755,
-      y: 95,
-      r: 24,
-      icon: Database,
-      details: 'Internal staff directory PostgreSQL cluster. Standard read operations.',
-    },
-    customer_db: {
-      id: 'customer_db',
-      name: 'Customer DB',
-      role: 'PII Store',
-      status: 'malicious',
-      type: 'database',
-      x: 755,
-      y: 265,
-      r: 24,
-      icon: Database,
-      details: 'Sensitive customer PII & credential database targeted for bulk table exfiltration.',
-    },
-  };
+  // Dynamic layout generator building nodes and links from real live events
+  const { nodes, paths, attackChain } = useMemo(() => {
+    if (!events || events.length === 0) {
+      return {
+        nodes: DEFAULT_NODES,
+        paths: DEFAULT_PATHS,
+        attackChain: [
+          { label: 'J. Singh', type: 'user' },
+          { label: 'Unknown Device', type: 'device' },
+          { label: 'HR_Agent', type: 'agent' },
+          { label: 'Payroll API', type: 'api' },
+          { label: 'Customer DB', type: 'database' },
+        ]
+      };
+    }
 
-  const handleNodeClick = (nodeId) => {
-    setSelectedNode(nodeId);
-    if (onSelectNode) onSelectNode(nodes[nodeId]);
+    // Helper to extract clean entity names and risk ratings
+    const userMap = new Map();
+    const deviceMap = new Map();
+    const agentMap = new Map();
+    const apiMap = new Map();
+    const dbMap = new Map();
+
+    const getRisk = (evt) => {
+      if (evt.metadata?.privilege_escalation || evt.resource?.includes('dump') || evt.resource?.includes('credential')) return 'malicious';
+      if (evt.metadata?.is_new_device || evt.event_type === 'failed_login' || evt.device_id?.startsWith('unknown')) return 'suspicious';
+      return 'normal';
+    };
+
+    // Parse all events
+    events.forEach((evt) => {
+      const risk = getRisk(evt);
+
+      // 1. User
+      const uName = evt.user_id || 'U_ANALYST';
+      const uKey = uName.toLowerCase().replace(/\s+/g, '_');
+      if (!userMap.has(uKey)) {
+        userMap.set(uKey, {
+          id: uKey,
+          name: uName,
+          role: uName.includes('Singh') ? 'Analyst' : uName.includes('Fatima') ? 'Security' : 'Employee',
+          status: risk,
+          type: 'user',
+          details: `User entity ${uName} active across event streams.`,
+        });
+      } else if (risk === 'malicious' || (risk === 'suspicious' && userMap.get(uKey).status === 'normal')) {
+        userMap.get(uKey).status = risk;
+      }
+
+      // 2. Device
+      const dName = evt.device_id || 'Laptop';
+      const dKey = dName.toLowerCase().replace(/\s+/g, '_');
+      if (!deviceMap.has(dKey)) {
+        deviceMap.set(dKey, {
+          id: dKey,
+          name: dName.length > 18 ? dName.slice(0, 16) + '...' : dName,
+          role: dName.includes('Tor') || dName.includes('Kali') ? 'Linux VM' : 'Corporate',
+          status: risk,
+          type: 'device',
+          details: `Endpoint ${dName} verified in telemetry logs.`,
+        });
+      } else if (risk === 'malicious' || (risk === 'suspicious' && deviceMap.get(dKey).status === 'normal')) {
+        deviceMap.get(dKey).status = risk;
+      }
+
+      // 3. Agent / Tool
+      if (evt.agent_id || evt.tool_name) {
+        const agName = evt.agent_id || evt.tool_name || 'HR_Agent';
+        const agKey = agName.toLowerCase().replace(/\s+/g, '_');
+        if (!agentMap.has(agKey)) {
+          agentMap.set(agKey, {
+            id: agKey,
+            name: agName,
+            role: evt.tool_name ? 'Tool' : 'AI Agent',
+            status: risk,
+            type: 'agent',
+            details: `Autonomous worker ${agName} invoked in session ${evt.session_id || 'active'}.`,
+          });
+        }
+      }
+
+      // 4. API Endpoint / Gateway
+      if (evt.resource && (evt.resource.includes('api') || evt.event_type?.includes('api') || evt.event_type?.includes('login'))) {
+        const apiName = evt.resource.includes('api') ? evt.resource.split('/').pop() || 'API' : 'Auth Gateway';
+        const apiKey = ('api_' + apiName).toLowerCase().replace(/[^a-z0-9]/g, '_');
+        if (!apiMap.has(apiKey)) {
+          apiMap.set(apiKey, {
+            id: apiKey,
+            name: apiName.toUpperCase(),
+            role: evt.resource.includes('payroll') ? 'Privileged' : 'REST Gateway',
+            status: risk,
+            type: 'api',
+            details: `API Endpoint resource: ${evt.resource}`,
+          });
+        }
+      }
+
+      // 5. Database / Data Store
+      if (evt.resource && (evt.resource.includes('database') || evt.resource.includes('customer') || evt.resource.includes('dump') || evt.event_type?.includes('database'))) {
+        const dbName = evt.resource.includes('customer') ? 'Customer DB' : 'Employee DB';
+        const dbKey = ('db_' + dbName).toLowerCase().replace(/[^a-z0-9]/g, '_');
+        if (!dbMap.has(dbKey)) {
+          dbMap.set(dbKey, {
+            id: dbKey,
+            name: dbName,
+            role: evt.resource.includes('credential') ? 'Credentials' : 'PII Store',
+            status: risk,
+            type: 'database',
+            details: `Persistent store resource target: ${evt.resource}`,
+          });
+        }
+      }
+    });
+
+    // Ensure default demo nodes are populated if lists are sparse
+    if (userMap.size < 2 && DEFAULT_NODES.a_verma) userMap.set('a_verma', DEFAULT_NODES.a_verma);
+    if (deviceMap.size < 2 && DEFAULT_NODES.laptop_win) deviceMap.set('laptop_win', DEFAULT_NODES.laptop_win);
+    if (agentMap.size < 1 && DEFAULT_NODES.hr_agent) agentMap.set('hr_agent', DEFAULT_NODES.hr_agent);
+    if (apiMap.size < 2 && DEFAULT_NODES.hr_api) apiMap.set('hr_api', DEFAULT_NODES.hr_api);
+    if (dbMap.size < 2 && DEFAULT_NODES.customer_db) dbMap.set('customer_db', DEFAULT_NODES.customer_db);
+
+    // Layout Columns: 5 Columns with vertical centering
+    const dynamicNodes = {};
+    const layoutCol = (mapObj, x, iconDefault) => {
+      const items = Array.from(mapObj.values()).slice(0, 4);
+      const count = items.length;
+      const startY = count === 1 ? 180 : count === 2 ? 100 : count === 3 ? 65 : 45;
+      const stepY = count === 1 ? 0 : count === 2 ? 160 : count === 3 ? 115 : 85;
+
+      items.forEach((item, idx) => {
+        const y = startY + idx * stepY;
+        dynamicNodes[item.id] = {
+          ...item,
+          x,
+          y,
+          r: item.type === 'agent' ? 28 : 24,
+          icon: iconDefault,
+        };
+      });
+    };
+
+    layoutCol(userMap, 70, User);
+    layoutCol(deviceMap, 235, Laptop);
+    layoutCol(agentMap, 410, Bot);
+    layoutCol(apiMap, 580, NetworkIcon);
+    layoutCol(dbMap, 755, Database);
+
+    // Compute Dynamic Connector Paths between contiguous columns
+    const dynamicPaths = [];
+    const allUsers = Object.values(dynamicNodes).filter(n => n.type === 'user');
+    const allDevices = Object.values(dynamicNodes).filter(n => n.type === 'device');
+    const allAgents = Object.values(dynamicNodes).filter(n => n.type === 'agent');
+    const allApis = Object.values(dynamicNodes).filter(n => n.type === 'api');
+    const allDbs = Object.values(dynamicNodes).filter(n => n.type === 'database');
+
+    // Link Users to Devices
+    allUsers.forEach((u, uIdx) => {
+      const targetDev = allDevices[uIdx % allDevices.length] || allDevices[0];
+      if (targetDev) {
+        const isMal = u.status === 'malicious' || targetDev.status === 'malicious';
+        const isSusp = u.status === 'suspicious' || targetDev.status === 'suspicious';
+        dynamicPaths.push({
+          d: `M ${u.x + u.r} ${u.y} C ${(u.x + targetDev.x) / 2} ${u.y}, ${(u.x + targetDev.x) / 2} ${targetDev.y}, ${targetDev.x - targetDev.r} ${targetDev.y}`,
+          color: isMal ? '#f43f5e' : isSusp ? '#f59e0b' : '#10b981',
+          strokeWidth: isMal ? 2.5 : 2,
+          filter: isMal ? 'url(#glow-red)' : isSusp ? 'url(#glow-amber)' : 'url(#glow-green)',
+          markerEnd: isMal ? 'url(#arrow-red)' : isSusp ? 'url(#arrow-amber)' : 'url(#arrow-green)',
+          strokeDasharray: isMal ? '6 4' : undefined,
+          animate: isMal,
+        });
+      }
+    });
+
+    // Link Devices to Agents or APIs
+    allDevices.forEach((dev, dIdx) => {
+      const targetAgent = allAgents[dIdx % allAgents.length] || allAgents[0];
+      if (targetAgent) {
+        const isMal = dev.status === 'malicious' || targetAgent.status === 'malicious';
+        const isSusp = dev.status === 'suspicious' || targetAgent.status === 'suspicious';
+        dynamicPaths.push({
+          d: `M ${dev.x + dev.r} ${dev.y} C ${(dev.x + targetAgent.x) / 2} ${dev.y}, ${(dev.x + targetAgent.x) / 2} ${targetAgent.y}, ${targetAgent.x - targetAgent.r} ${targetAgent.y}`,
+          color: isMal ? '#f43f5e' : isSusp ? '#f59e0b' : '#10b981',
+          strokeWidth: isMal ? 2.5 : 2,
+          filter: isMal ? 'url(#glow-red)' : isSusp ? 'url(#glow-amber)' : 'url(#glow-green)',
+          markerEnd: isMal ? 'url(#arrow-red)' : isSusp ? 'url(#arrow-amber)' : 'url(#arrow-green)',
+          strokeDasharray: isMal ? '6 4' : undefined,
+          animate: isMal,
+        });
+      }
+    });
+
+    // Link Agents to APIs
+    allAgents.forEach((ag, aIdx) => {
+      allApis.forEach((api) => {
+        const isMal = ag.status === 'malicious' || api.status === 'malicious';
+        const isSusp = ag.status === 'suspicious' || api.status === 'suspicious';
+        dynamicPaths.push({
+          d: `M ${ag.x + ag.r} ${ag.y} C ${(ag.x + api.x) / 2} ${ag.y}, ${(ag.x + api.x) / 2} ${api.y}, ${api.x - api.r} ${api.y}`,
+          color: isMal ? '#f43f5e' : isSusp ? '#f59e0b' : '#10b981',
+          strokeWidth: isMal ? 2.5 : 1.8,
+          filter: isMal ? 'url(#glow-red)' : isSusp ? 'url(#glow-amber)' : 'url(#glow-green)',
+          markerEnd: isMal ? 'url(#arrow-red)' : isSusp ? 'url(#arrow-amber)' : 'url(#arrow-green)',
+          strokeDasharray: isMal ? '6 4' : undefined,
+          animate: isMal,
+        });
+      });
+    });
+
+    // Link APIs to Databases
+    allApis.forEach((api, pIdx) => {
+      const targetDb = allDbs[pIdx % allDbs.length] || allDbs[0];
+      if (targetDb) {
+        const isMal = api.status === 'malicious' || targetDb.status === 'malicious';
+        const isSusp = api.status === 'suspicious' || targetDb.status === 'suspicious';
+        dynamicPaths.push({
+          d: `M ${api.x + api.r} ${api.y} L ${targetDb.x - targetDb.r} ${targetDb.y}`,
+          color: isMal ? '#f43f5e' : isSusp ? '#f59e0b' : '#10b981',
+          strokeWidth: isMal ? 2.5 : 2,
+          filter: isMal ? 'url(#glow-red)' : isSusp ? 'url(#glow-amber)' : 'url(#glow-green)',
+          markerEnd: isMal ? 'url(#arrow-red)' : isSusp ? 'url(#arrow-amber)' : 'url(#arrow-green)',
+          strokeDasharray: isMal ? '6 4' : undefined,
+          animate: isMal,
+        });
+      }
+    });
+
+    // Derive Attack Chain for Bottom Banner
+    const topThreatUser = allUsers.find(u => u.status === 'malicious') || allUsers[0];
+    const topThreatDev = allDevices.find(d => d.status === 'malicious') || allDevices[0];
+    const topThreatAgent = allAgents[0];
+    const topThreatApi = allApis.find(a => a.status === 'malicious') || allApis[0];
+    const topThreatDb = allDbs.find(d => d.status === 'malicious') || allDbs[0];
+
+    const chain = [];
+    if (topThreatUser) chain.push({ label: topThreatUser.name, type: 'user' });
+    if (topThreatDev) chain.push({ label: topThreatDev.name, type: 'device' });
+    if (topThreatAgent) chain.push({ label: topThreatAgent.name, type: 'agent' });
+    if (topThreatApi) chain.push({ label: topThreatApi.name, type: 'api' });
+    if (topThreatDb) chain.push({ label: topThreatDb.name, type: 'database' });
+
+    return {
+      nodes: dynamicNodes,
+      paths: dynamicPaths,
+      attackChain: chain
+    };
+  }, [events]);
+
+  const activeSelectedKey = selectedNodeId || Object.keys(nodes)[0] || 'j_singh';
+  const selectedNode = nodes[activeSelectedKey] || Object.values(nodes)[0];
+
+  const handleNodeClick = (nodeKey) => {
+    setSelectedNodeId(nodeKey);
+    if (onSelectNode && nodes[nodeKey]) onSelectNode(nodes[nodeKey]);
   };
 
   return (
@@ -169,7 +435,7 @@ export function LiveSecurityGraph({
         </div>
 
         {/* Legend */}
-        <div className="flex items-center gap-5 text-xs font-medium">
+        <div className="flex items-center gap-5 text-xs font-medium font-mono">
           <div className="flex items-center gap-2">
             <span className="w-2.5 h-2.5 rounded-sm bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
             <span className="text-slate-300">Normal</span>
@@ -185,7 +451,7 @@ export function LiveSecurityGraph({
         </div>
       </div>
 
-      {/* Interactive Visual Graph Canvas (Fully responsive SVG without scrollbar) */}
+      {/* Interactive Visual Graph Canvas (Fully responsive SVG) */}
       <div className="relative w-full py-4 overflow-hidden">
         <div className="w-full max-w-[880px] mx-auto select-none">
           
@@ -250,370 +516,72 @@ export function LiveSecurityGraph({
               </filter>
             </defs>
 
-            {/* Path 1: A. Verma (70, 65) -> Laptop (235, 95) [Normal Green Curve] */}
-            <path
-              d="M 94 65 C 165 65, 165 95, 211 95"
-              fill="none"
-              stroke="#10b981"
-              strokeWidth="2"
-              filter="url(#glow-green)"
-              className="opacity-80"
-            />
-
-            {/* Path 2: R. Khan (70, 295) -> Laptop (235, 95) [Baseline Green Curve] */}
-            <path
-              d="M 94 295 C 165 295, 165 95, 211 95"
-              fill="none"
-              stroke="#10b981"
-              strokeWidth="1.5"
-              className="opacity-40"
-            />
-
-            {/* Path 3: J. Singh (70, 180) -> Unknown Device (235, 265) [Malicious Solid Red Vector] */}
-            <path
-              d="M 94 180 C 165 180, 165 265, 211 265"
-              fill="none"
-              stroke="#f43f5e"
-              strokeWidth="2.5"
-              filter="url(#glow-red)"
-              markerEnd="url(#arrow-red)"
-            />
-
-            {/* Path 4: Laptop (235, 95) -> HR API (580, 95) [Normal Traffic Across Top] */}
-            <path
-              d="M 259 95 L 556 95"
-              fill="none"
-              stroke="#10b981"
-              strokeWidth="2"
-              filter="url(#glow-green)"
-              className="opacity-80"
-            />
-
-            {/* Path 5: Laptop (235, 95) -> HR_Agent (410, 180) [Normal Agent Interaction] */}
-            <path
-              d="M 259 95 C 320 95, 320 180, 382 180"
-              fill="none"
-              stroke="#10b981"
-              strokeWidth="1.8"
-              className="opacity-60"
-            />
-
-            {/* Path 6: Unknown Device (235, 265) -> HR_Agent (410, 180) [Red Dashed Attack Vector] */}
-            <path
-              d="M 259 265 C 320 265, 320 180, 382 180"
-              fill="none"
-              stroke="#f43f5e"
-              strokeWidth="2.5"
-              strokeDasharray="6 4"
-              filter="url(#glow-red)"
-              markerEnd="url(#arrow-red)"
-              className="animate-pulse"
-            />
-
-            {/* Path 7: HR_Agent (410, 180) -> HR API (580, 95) [Amber Suspicious Interconnect] */}
-            <path
-              d="M 438 180 C 495 180, 495 95, 556 95"
-              fill="none"
-              stroke="#f59e0b"
-              strokeWidth="2"
-              filter="url(#glow-amber)"
-              markerEnd="url(#arrow-amber)"
-            />
-
-            {/* Path 8: HR_Agent (410, 180) -> Payroll API (580, 265) [Red Dashed Exploit Vector] */}
-            <path
-              d="M 438 180 C 495 180, 495 265, 556 265"
-              fill="none"
-              stroke="#f43f5e"
-              strokeWidth="2.5"
-              strokeDasharray="6 4"
-              filter="url(#glow-red)"
-              markerEnd="url(#arrow-red)"
-              className="animate-pulse"
-            />
-
-            {/* Path 9: HR API (580, 95) -> Employee DB (755, 95) [Green DB Query] */}
-            <path
-              d="M 604 95 L 731 95"
-              fill="none"
-              stroke="#10b981"
-              strokeWidth="2"
-              filter="url(#glow-green)"
-              markerEnd="url(#arrow-green)"
-              className="opacity-80"
-            />
-
-            {/* Path 10: Payroll API (580, 265) -> Customer DB (755, 265) [Red Dashed Exfiltration Vector] */}
-            <path
-              d="M 604 265 L 731 265"
-              fill="none"
-              stroke="#f43f5e"
-              strokeWidth="2.5"
-              strokeDasharray="6 4"
-              filter="url(#glow-red)"
-              markerEnd="url(#arrow-red)"
-              className="animate-pulse"
-            />
-
-            {/* Path 11: HR API (580, 95) <-> Payroll API (580, 265) [Suspicious Bridge] */}
-            <path
-              d="M 580 119 L 580 241"
-              fill="none"
-              stroke="#f59e0b"
-              strokeWidth="1.8"
-              strokeDasharray="4 3"
-              className="opacity-60"
-            />
-
-            {/* Node 1: A. Verma */}
-            <g 
-              onClick={() => handleNodeClick('a_verma')}
-              className="cursor-pointer group"
-              transform={`translate(${nodes.a_verma.x}, ${nodes.a_verma.y})`}
-            >
-              <circle
-                r="24"
-                fill="#090d16"
-                stroke="#34d399"
-                strokeWidth="2"
-                filter="url(#glow-green)"
-                className={`transition-all ${selectedNode === 'a_verma' ? 'stroke-white stroke-[3]' : ''}`}
+            {/* Dynamic Connecting Paths */}
+            {paths.map((p, idx) => (
+              <path
+                key={idx}
+                d={p.d}
+                fill="none"
+                stroke={p.color}
+                strokeWidth={p.strokeWidth || 2}
+                strokeDasharray={p.strokeDasharray}
+                filter={p.filter}
+                markerEnd={p.markerEnd}
+                className={`transition-all duration-500 ${p.animate ? 'animate-pulse' : ''} ${p.opacity ? `opacity-${Math.round(p.opacity * 100)}` : ''}`}
               />
-              <foreignObject x="-12" y="-12" width="24" height="24" className="pointer-events-none">
-                <User size={24} className="text-emerald-400" />
-              </foreignObject>
-              <text x="32" y="-3" fill="#ffffff" fontSize="12" fontWeight="700" fontFamily="sans-serif">
-                A. Verma
-              </text>
-              <text x="32" y="13" fill="#94a3b8" fontSize="10" fontFamily="sans-serif">
-                (Employee)
-              </text>
-            </g>
+            ))}
 
-            {/* Node 2: J. Singh (Malicious) */}
-            <g 
-              onClick={() => handleNodeClick('j_singh')}
-              className="cursor-pointer group"
-              transform={`translate(${nodes.j_singh.x}, ${nodes.j_singh.y})`}
-            >
-              <circle
-                r="24"
-                fill="#090d16"
-                stroke="#f43f5e"
-                strokeWidth="2.5"
-                filter="url(#glow-red)"
-                className={`transition-all ${selectedNode === 'j_singh' ? 'stroke-white stroke-[3]' : ''}`}
-              />
-              <foreignObject x="-12" y="-12" width="24" height="24" className="pointer-events-none">
-                <User size={24} className="text-rose-400" />
-              </foreignObject>
-              <text x="32" y="-3" fill="#ffffff" fontSize="12" fontWeight="700" fontFamily="sans-serif">
-                J. Singh
-              </text>
-              <text x="32" y="13" fill="#94a3b8" fontSize="10" fontFamily="sans-serif">
-                (Analyst)
-              </text>
-            </g>
+            {/* Dynamic Graph Nodes */}
+            {Object.entries(nodes).map(([nodeKey, node]) => {
+              const isSelected = activeSelectedKey === nodeKey;
+              const isMal = node.status === 'malicious';
+              const isSusp = node.status === 'suspicious';
+              const strokeColor = isMal ? '#f43f5e' : isSusp ? '#f59e0b' : '#34d399';
+              const filterUrl = isMal ? 'url(#glow-red)' : isSusp ? 'url(#glow-amber)' : 'url(#glow-green)';
+              const IconComp = node.icon || (node.type === 'user' ? User : node.type === 'device' ? Laptop : node.type === 'agent' ? Bot : node.type === 'api' ? NetworkIcon : Database);
 
-            {/* Node 3: R. Khan */}
-            <g 
-              onClick={() => handleNodeClick('r_khan')}
-              className="cursor-pointer group"
-              transform={`translate(${nodes.r_khan.x}, ${nodes.r_khan.y})`}
-            >
-              <circle
-                r="24"
-                fill="#090d16"
-                stroke="#34d399"
-                strokeWidth="2"
-                filter="url(#glow-green)"
-                className={`transition-all ${selectedNode === 'r_khan' ? 'stroke-white stroke-[3]' : ''}`}
-              />
-              <foreignObject x="-12" y="-12" width="24" height="24" className="pointer-events-none">
-                <User size={24} className="text-emerald-400" />
-              </foreignObject>
-              <text x="32" y="-3" fill="#ffffff" fontSize="12" fontWeight="700" fontFamily="sans-serif">
-                R. Khan
-              </text>
-              <text x="32" y="13" fill="#94a3b8" fontSize="10" fontFamily="sans-serif">
-                (Contractor)
-              </text>
-            </g>
+              return (
+                <g 
+                  key={nodeKey}
+                  onClick={() => handleNodeClick(nodeKey)}
+                  className="cursor-pointer group"
+                  transform={`translate(${node.x}, ${node.y})`}
+                >
+                  <circle
+                    r={node.r || 24}
+                    fill="#090d16"
+                    stroke={strokeColor}
+                    strokeWidth={isSelected ? 3.5 : isMal ? 2.5 : 2}
+                    filter={filterUrl}
+                    className={`transition-all duration-300 ${isSelected ? 'stroke-white' : ''}`}
+                  />
+                  <foreignObject x={-(node.r || 24) / 2} y={-(node.r || 24) / 2} width={node.r || 24} height={node.r || 24} className="pointer-events-none flex items-center justify-center">
+                    <IconComp size={(node.r || 24) - 2} className={isMal ? 'text-rose-400' : isSusp ? 'text-amber-400' : 'text-emerald-400'} />
+                  </foreignObject>
 
-            {/* Node 4: Laptop (Windows) */}
-            <g 
-              onClick={() => handleNodeClick('laptop_win')}
-              className="cursor-pointer group"
-              transform={`translate(${nodes.laptop_win.x}, ${nodes.laptop_win.y})`}
-            >
-              <circle
-                r="24"
-                fill="#090d16"
-                stroke="#34d399"
-                strokeWidth="2"
-                filter="url(#glow-green)"
-                className={`transition-all ${selectedNode === 'laptop_win' ? 'stroke-white stroke-[3]' : ''}`}
-              />
-              <foreignObject x="-12" y="-12" width="24" height="24" className="pointer-events-none">
-                <Monitor size={24} className="text-emerald-400" />
-              </foreignObject>
-              <text x="0" y="38" textAnchor="middle" fill="#ffffff" fontSize="12" fontWeight="700" fontFamily="sans-serif">
-                Laptop
-              </text>
-              <text x="0" y="52" textAnchor="middle" fill="#94a3b8" fontSize="10" fontFamily="sans-serif">
-                (Windows)
-              </text>
-            </g>
-
-            {/* Node 5: Unknown Device (Linux) */}
-            <g 
-              onClick={() => handleNodeClick('unknown_device')}
-              className="cursor-pointer group"
-              transform={`translate(${nodes.unknown_device.x}, ${nodes.unknown_device.y})`}
-            >
-              <circle
-                r="24"
-                fill="#090d16"
-                stroke="#f43f5e"
-                strokeWidth="2.5"
-                filter="url(#glow-red)"
-                className={`transition-all ${selectedNode === 'unknown_device' ? 'stroke-white stroke-[3]' : ''}`}
-              />
-              <foreignObject x="-12" y="-12" width="24" height="24" className="pointer-events-none">
-                <Bot size={24} className="text-rose-400" />
-              </foreignObject>
-              <text x="0" y="38" textAnchor="middle" fill="#ffffff" fontSize="12" fontWeight="700" fontFamily="sans-serif">
-                Unknown Device
-              </text>
-              <text x="0" y="52" textAnchor="middle" fill="#94a3b8" fontSize="10" fontFamily="sans-serif">
-                (Linux)
-              </text>
-            </g>
-
-            {/* Node 6: HR_Agent (AI Agent) */}
-            <g 
-              onClick={() => handleNodeClick('hr_agent')}
-              className="cursor-pointer group"
-              transform={`translate(${nodes.hr_agent.x}, ${nodes.hr_agent.y})`}
-            >
-              <circle
-                r="28"
-                fill="#090d16"
-                stroke="#f43f5e"
-                strokeWidth="3"
-                filter="url(#glow-red)"
-                className={`transition-all ${selectedNode === 'hr_agent' ? 'stroke-white stroke-[4]' : ''}`}
-              />
-              <foreignObject x="-14" y="-14" width="28" height="28" className="pointer-events-none">
-                <Bot size={28} className="text-rose-400" />
-              </foreignObject>
-              <text x="0" y="44" textAnchor="middle" fill="#ffffff" fontSize="12" fontWeight="700" fontFamily="sans-serif">
-                HR_Agent
-              </text>
-              <text x="0" y="58" textAnchor="middle" fill="#94a3b8" fontSize="10" fontFamily="sans-serif">
-                (AI Agent)
-              </text>
-            </g>
-
-            {/* Node 7: HR API (Suspicious Yellow/Amber) */}
-            <g 
-              onClick={() => handleNodeClick('hr_api')}
-              className="cursor-pointer group"
-              transform={`translate(${nodes.hr_api.x}, ${nodes.hr_api.y})`}
-            >
-              <circle
-                r="24"
-                fill="#090d16"
-                stroke="#f59e0b"
-                strokeWidth="2.5"
-                filter="url(#glow-amber)"
-                className={`transition-all ${selectedNode === 'hr_api' ? 'stroke-white stroke-[3]' : ''}`}
-              />
-              <foreignObject x="-12" y="-12" width="24" height="24" className="pointer-events-none">
-                <NetworkIcon size={24} className="text-amber-400" />
-              </foreignObject>
-              <text x="0" y="38" textAnchor="middle" fill="#ffffff" fontSize="12" fontWeight="700" fontFamily="sans-serif">
-                HR API
-              </text>
-              <text x="0" y="52" textAnchor="middle" fill="#fcd34d" fontSize="10" fontFamily="sans-serif">
-                (REST)
-              </text>
-            </g>
-
-            {/* Node 8: Payroll API (Malicious Target) */}
-            <g 
-              onClick={() => handleNodeClick('payroll_api')}
-              className="cursor-pointer group"
-              transform={`translate(${nodes.payroll_api.x}, ${nodes.payroll_api.y})`}
-            >
-              <circle
-                r="24"
-                fill="#090d16"
-                stroke="#f43f5e"
-                strokeWidth="2.5"
-                filter="url(#glow-red)"
-                className={`transition-all ${selectedNode === 'payroll_api' ? 'stroke-white stroke-[3]' : ''}`}
-              />
-              <foreignObject x="-12" y="-12" width="24" height="24" className="pointer-events-none">
-                <Shield size={24} className="text-rose-400" />
-              </foreignObject>
-              <text x="0" y="38" textAnchor="middle" fill="#ffffff" fontSize="12" fontWeight="700" fontFamily="sans-serif">
-                Payroll API
-              </text>
-              <text x="0" y="52" textAnchor="middle" fill="#fda4af" fontSize="10" fontFamily="sans-serif">
-                (Privileged)
-              </text>
-            </g>
-
-            {/* Node 9: Employee DB */}
-            <g 
-              onClick={() => handleNodeClick('employee_db')}
-              className="cursor-pointer group"
-              transform={`translate(${nodes.employee_db.x}, ${nodes.employee_db.y})`}
-            >
-              <circle
-                r="24"
-                fill="#090d16"
-                stroke="#34d399"
-                strokeWidth="2"
-                filter="url(#glow-green)"
-                className={`transition-all ${selectedNode === 'employee_db' ? 'stroke-white stroke-[3]' : ''}`}
-              />
-              <foreignObject x="-12" y="-12" width="24" height="24" className="pointer-events-none">
-                <Database size={24} className="text-emerald-400" />
-              </foreignObject>
-              <text x="0" y="38" textAnchor="middle" fill="#ffffff" fontSize="12" fontWeight="700" fontFamily="sans-serif">
-                Employee DB
-              </text>
-              <text x="0" y="52" textAnchor="middle" fill="#94a3b8" fontSize="10" fontFamily="sans-serif">
-                (PostgreSQL)
-              </text>
-            </g>
-
-            {/* Node 10: Customer DB (Malicious Breach Target) */}
-            <g 
-              onClick={() => handleNodeClick('customer_db')}
-              className="cursor-pointer group"
-              transform={`translate(${nodes.customer_db.x}, ${nodes.customer_db.y})`}
-            >
-              <circle
-                r="24"
-                fill="#090d16"
-                stroke="#f43f5e"
-                strokeWidth="2.5"
-                filter="url(#glow-red)"
-                className={`transition-all ${selectedNode === 'customer_db' ? 'stroke-white stroke-[3]' : ''}`}
-              />
-              <foreignObject x="-12" y="-12" width="24" height="24" className="pointer-events-none">
-                <Database size={24} className="text-rose-400" />
-              </foreignObject>
-              <text x="0" y="38" textAnchor="middle" fill="#ffffff" fontSize="12" fontWeight="700" fontFamily="sans-serif">
-                Customer DB
-              </text>
-              <text x="0" y="52" textAnchor="middle" fill="#fda4af" fontSize="10" fontFamily="sans-serif">
-                (Credentials)
-              </text>
-            </g>
+                  {/* Label Text below node or side */}
+                  {node.type === 'user' ? (
+                    <>
+                      <text x="32" y="-3" fill="#ffffff" fontSize="12" fontWeight="700" fontFamily="sans-serif">
+                        {node.name}
+                      </text>
+                      <text x="32" y="13" fill="#94a3b8" fontSize="10" fontFamily="sans-serif">
+                        ({node.role || 'User'})
+                      </text>
+                    </>
+                  ) : (
+                    <>
+                      <text x="0" y={(node.r || 24) + 14} textAnchor="middle" fill="#ffffff" fontSize="11" fontWeight="700" fontFamily="sans-serif">
+                        {node.name}
+                      </text>
+                      <text x="0" y={(node.r || 24) + 26} textAnchor="middle" fill={isMal ? '#fda4af' : isSusp ? '#fcd34d' : '#94a3b8'} fontSize="9.5" fontFamily="sans-serif">
+                        ({node.role || node.type})
+                      </text>
+                    </>
+                  )}
+                </g>
+              );
+            })}
 
           </svg>
 
@@ -621,23 +589,23 @@ export function LiveSecurityGraph({
       </div>
 
       {/* Node Inspector Callout if selected */}
-      {selectedNode && nodes[selectedNode] && (
-        <div className="mb-4 p-3.5 bg-slate-900/90 border border-slate-800 rounded-xl flex items-center justify-between text-xs font-mono">
+      {selectedNode && (
+        <div className="mb-4 p-3.5 bg-slate-900/90 border border-slate-800 rounded-xl flex items-center justify-between text-xs font-mono shadow-md">
           <div className="flex items-center gap-2.5">
             <Info size={15} className="text-cyan-400" />
-            <span className="text-white font-bold">{nodes[selectedNode].name}</span>
-            {nodes[selectedNode].role && <span className="text-slate-400">({nodes[selectedNode].role})</span>}
+            <span className="text-white font-bold">{selectedNode.name}</span>
+            {selectedNode.role && <span className="text-slate-400">({selectedNode.role})</span>}
             <span className="text-slate-600">|</span>
-            <span className="text-slate-300">{nodes[selectedNode].details}</span>
+            <span className="text-slate-300">{selectedNode.details}</span>
           </div>
           <span className={`px-2.5 py-0.5 rounded text-[10px] uppercase font-bold border ${
-            nodes[selectedNode].status === 'malicious' 
+            selectedNode.status === 'malicious' 
               ? 'bg-rose-950/80 text-rose-300 border-rose-800' 
-              : nodes[selectedNode].status === 'suspicious'
+              : selectedNode.status === 'suspicious'
               ? 'bg-amber-950/80 text-amber-300 border-amber-800'
               : 'bg-emerald-950/80 text-emerald-300 border-emerald-800'
           }`}>
-            {nodes[selectedNode].status}
+            {selectedNode.status}
           </span>
         </div>
       )}
@@ -650,7 +618,7 @@ export function LiveSecurityGraph({
               <AlertTriangle size={15} />
             </div>
             <h4 className="text-sm font-bold text-rose-400 tracking-wide">
-              Attack Path Detected
+              Correlated Vector Progression
             </h4>
           </div>
 
@@ -658,47 +626,40 @@ export function LiveSecurityGraph({
             onClick={() => onInvestigate && onInvestigate()}
             className="px-3.5 py-1.5 rounded-lg border border-rose-800/80 bg-rose-950/50 hover:bg-rose-900/60 text-rose-300 hover:text-white text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 shadow-sm"
           >
-            <span>Investigate</span>
+            <span>Investigate Incident</span>
             <ArrowRight size={13} />
           </button>
         </div>
 
         {/* Breadcrumb Steps Row */}
-        <div className="flex flex-wrap items-center gap-2 mb-2.5">
-          <span className="px-3 py-1.5 bg-slate-900/90 border border-slate-800 rounded-lg text-xs font-mono text-slate-200">
-            J. Singh
-          </span>
-          <ArrowRight size={13} className="text-rose-500 shrink-0" />
-
-          <span className="px-3 py-1.5 bg-slate-900/90 border border-slate-800 rounded-lg text-xs font-mono text-slate-200">
-            Unknown Device
-          </span>
-          <ArrowRight size={13} className="text-rose-500 shrink-0" />
-
-          <span className="px-3 py-1.5 bg-slate-900/90 border border-slate-800 rounded-lg text-xs font-mono text-slate-200">
-            HR_Agent
-          </span>
-          <ArrowRight size={13} className="text-rose-500 shrink-0" />
-
-          <span className="px-3 py-1.5 bg-slate-900/90 border border-slate-800 rounded-lg text-xs font-mono text-slate-200">
-            Payroll API
-          </span>
-          <ArrowRight size={13} className="text-rose-500 shrink-0" />
-
-          <span className="px-3 py-1.5 bg-slate-900/90 border border-rose-800/80 text-rose-300 font-mono text-xs rounded-lg bg-rose-950/30">
-            Customer DB
-          </span>
+        <div className="flex flex-wrap items-center gap-2 mb-2.5 font-mono text-xs">
+          {attackChain.map((step, idx) => (
+            <React.Fragment key={idx}>
+              <span className={`px-3 py-1.5 rounded-lg border text-xs font-bold ${
+                idx === attackChain.length - 1
+                  ? 'bg-rose-950/80 border-rose-700 text-rose-200'
+                  : 'bg-slate-900/90 border-slate-800 text-slate-200'
+              }`}>
+                {step.label}
+              </span>
+              {idx < attackChain.length - 1 && (
+                <ArrowRight size={13} className="text-rose-500 shrink-0" />
+              )}
+            </React.Fragment>
+          ))}
         </div>
 
         {/* Explanatory Behavior Sequence Row */}
         <div className="text-[11px] font-mono text-slate-400 flex flex-wrap items-center gap-2">
-          <span>Unusual login</span>
+          <span>Authentication</span>
           <span className="text-rose-500">→</span>
-          <span>Abnormal API calls</span>
+          <span>Endpoint Device</span>
           <span className="text-rose-500">→</span>
-          <span>Possible prompt injection</span>
+          <span>Tool/Agent Invocation</span>
           <span className="text-rose-500">→</span>
-          <span className="text-rose-300 font-semibold">Sensitive data access</span>
+          <span>API Access</span>
+          <span className="text-rose-500">→</span>
+          <span className="text-rose-300 font-semibold">Sensitive Store Access</span>
         </div>
       </div>
     </div>

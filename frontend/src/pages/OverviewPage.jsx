@@ -203,6 +203,7 @@ export function OverviewPage({
 
       {/* Featured Live Security Graph (Matching Exact User Architecture) */}
       <LiveSecurityGraph
+        events={events}
         onInvestigate={() => {
           if (incidents.length > 0 && onSelectIncident) {
             onSelectIncident(incidents[0]);

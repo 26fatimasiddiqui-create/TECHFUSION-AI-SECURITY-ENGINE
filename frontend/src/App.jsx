@@ -511,6 +511,7 @@ export function App() {
 
       {currentTab === 'graph' && (
         <UserActivityGraphPage
+          events={events}
           targetUser={selectedGraphUser}
           setTargetUser={setSelectedGraphUser}
           onSelectIncident={(inc) => {

@@ -75,6 +75,7 @@ const RISK_CONFIG = {
 };
 
 export function UserActivityGraphPage({ 
+  events = [],
   onSelectIncident, 
   onSelectEvent,
   onRunDemo,
@@ -491,6 +492,7 @@ export function UserActivityGraphPage({
           {/* VIEW MODE 1: LIVE SECURITY GRAPH (Exact Visual Layout from User Architecture) */}
           {graphMode === 'live_security_graph' && (
             <LiveSecurityGraph
+              events={events}
               onInvestigate={() => {
                 if (graphData?.incidents && graphData.incidents.length > 0 && onSelectIncident) {
                   onSelectIncident({ id: graphData.incidents[0].id });
