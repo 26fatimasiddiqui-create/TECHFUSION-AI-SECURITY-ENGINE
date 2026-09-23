@@ -79,12 +79,21 @@ export function UserActivityGraphPage({
   onSelectEvent,
   onRunDemo,
   setTab,
+  targetUser = '',
+  setTargetUser
 }) {
   const [usersList, setUsersList] = useState([]);
-  const [selectedUserId, setSelectedUserId] = useState('');
+  const [selectedUserId, setSelectedUserId] = useState(targetUser || '');
   const [graphData, setGraphData] = useState(null);
   const [isGraphLoading, setIsGraphLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  // Sync with targetUser if passed from parent
+  useEffect(() => {
+    if (targetUser) {
+      setSelectedUserId(targetUser);
+    }
+  }, [targetUser]);
 
   // View mode & Filter states
   const [graphMode, setGraphMode] = useState('live_security_graph'); // 'live_security_graph' | 'entity_tiers'
@@ -95,7 +104,7 @@ export function UserActivityGraphPage({
   const [selectedTimelineStep, setSelectedTimelineStep] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // 1. Fetch available users list on mount
+  // 1. Fetch available users list on mount and periodically
   const fetchUsers = useCallback(async (keepSelection = false) => {
     try {
       setError(null);
@@ -103,8 +112,10 @@ export function UserActivityGraphPage({
       setUsersList(users);
 
       if (users.length > 0) {
-        if (!keepSelection || !selectedUserId) {
-          // Default to first user or demo user
+        if (targetUser && users.some(u => u.user_id === targetUser)) {
+          setSelectedUserId(targetUser);
+        } else if (!keepSelection || !selectedUserId) {
+          // Default to latest active user or target user
           const demoUser = users.find(u => u.user_id.includes('DEMO') || u.user_id.includes('HACKATHON'));
           setSelectedUserId(demoUser ? demoUser.user_id : users[0].user_id);
         }
@@ -113,7 +124,7 @@ export function UserActivityGraphPage({
       console.error('Failed to load users:', err);
       setError(err.message || 'Error loading tracked users');
     }
-  }, [selectedUserId]);
+  }, [selectedUserId, targetUser]);
 
   useEffect(() => {
     fetchUsers();
@@ -288,6 +299,37 @@ export function UserActivityGraphPage({
           </button>
         </div>
       </div>
+
+      {/* Quick User Switcher Pill Bar */}
+      {usersList.length > 0 && (
+        <div className="flex items-center gap-2 overflow-x-auto pb-1 font-mono text-xs">
+          <span className="text-slate-400 text-[11px] font-semibold shrink-0 uppercase tracking-wider">Select User Graph:</span>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {usersList.map((u) => (
+              <button
+                key={u.user_id}
+                onClick={() => {
+                  setSelectedUserId(u.user_id);
+                  if (setTargetUser) setTargetUser(u.user_id);
+                }}
+                className={`px-3 py-1.5 rounded-xl border flex items-center gap-2 transition-all cursor-pointer text-xs font-mono ${
+                  u.user_id === selectedUserId
+                    ? 'bg-cyan-950/90 border-cyan-500 text-cyan-200 font-bold shadow-md shadow-cyan-950/60 ring-1 ring-cyan-500/50'
+                    : 'bg-slate-900/80 border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 hover:bg-slate-800'
+                }`}
+              >
+                <UserIcon size={13} className={u.user_id === selectedUserId ? 'text-cyan-400' : 'text-slate-500'} />
+                <span>{u.user_id}</span>
+                <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                  u.user_id === selectedUserId ? 'bg-cyan-800/70 text-cyan-100 font-bold' : 'bg-slate-800 text-slate-400'
+                }`}>
+                  {u.event_count} {u.event_count === 1 ? 'event' : 'events'}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Global Error Banner */}
       {error && (

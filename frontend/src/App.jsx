@@ -47,6 +47,7 @@ export function App() {
   const [inspectedEvent, setInspectedEvent] = useState(null);
   const [selectedIncident, setSelectedIncident] = useState(null);
   const [inspectedAlert, setInspectedAlert] = useState(null);
+  const [selectedGraphUser, setSelectedGraphUser] = useState('');
 
   // Fetch all dashboard data from real API endpoints with error isolation
   const fetchData = useCallback(async (isSilent = false) => {
@@ -490,6 +491,10 @@ export function App() {
           error={eventsError}
           onRefresh={() => fetchData(true)}
           onSelectEvent={(evt) => setInspectedEvent(evt)}
+          onViewInGraph={(uid) => {
+            setSelectedGraphUser(uid);
+            setCurrentTab('graph');
+          }}
         />
       )}
 
@@ -506,6 +511,8 @@ export function App() {
 
       {currentTab === 'graph' && (
         <UserActivityGraphPage
+          targetUser={selectedGraphUser}
+          setTargetUser={setSelectedGraphUser}
           onSelectIncident={(inc) => {
             setSelectedIncident(inc);
             setCurrentTab('incidents');

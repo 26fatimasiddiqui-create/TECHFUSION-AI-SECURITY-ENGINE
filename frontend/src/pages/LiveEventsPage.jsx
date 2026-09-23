@@ -24,13 +24,15 @@ export function LiveEventsPage({
   isLoading = false,
   error = null,
   onRefresh, 
-  onSelectEvent 
+  onSelectEvent,
+  onViewInGraph
 }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState('all');
   const [isIngestModalOpen, setIsIngestModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
+  const [ingestSuccess, setIngestSuccess] = useState(null);
 
   // New Event Form State
   const [formData, setFormData] = useState({
@@ -117,8 +119,13 @@ export function LiveEventsPage({
           privilege_escalation: formData.privilege_escalation,
         }
       };
-      await ingestEvent(payload);
+      const res = await ingestEvent(payload);
       setIsIngestModalOpen(false);
+      setIngestSuccess({
+        user_id: formData.user_id || 'Unknown',
+        event_id: res?.event?.id || 'EVT-NEW',
+        device_id: formData.device_id || 'Unknown Device'
+      });
       if (onRefresh) onRefresh();
     } catch (err) {
       setSubmitError(err.message || 'Failed to ingest event');
@@ -143,7 +150,10 @@ export function LiveEventsPage({
 
         <div className="flex items-center gap-2.5">
           <button
-            onClick={() => setIsIngestModalOpen(true)}
+            onClick={() => {
+              setIngestSuccess(null);
+              setIsIngestModalOpen(true);
+            }}
             className="flex items-center gap-1.5 px-3.5 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-cyan-950/40 transition-all cursor-pointer"
           >
             <Plus size={14} />
@@ -151,6 +161,27 @@ export function LiveEventsPage({
           </button>
         </div>
       </div>
+
+      {/* Ingest Success Banner with One-Click Graph Link */}
+      {ingestSuccess && (
+        <div className="p-4 rounded-xl bg-emerald-950/80 border border-emerald-700 text-emerald-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs font-mono shadow-lg animate-in fade-in slide-in-from-top-2 duration-300">
+          <div className="flex items-center gap-2.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
+            <span>
+              ✓ Successfully ingested event <strong>{ingestSuccess.event_id}</strong> for user <strong className="text-white underline">{ingestSuccess.user_id}</strong> on device <strong>{ingestSuccess.device_id}</strong>.
+            </span>
+          </div>
+          {onViewInGraph && (
+            <button
+              onClick={() => onViewInGraph(ingestSuccess.user_id)}
+              className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shrink-0 shadow-xs"
+            >
+              <span>View in Activity Graph</span>
+              <span className="text-emerald-200">→</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Error State Banner */}
       {error && (

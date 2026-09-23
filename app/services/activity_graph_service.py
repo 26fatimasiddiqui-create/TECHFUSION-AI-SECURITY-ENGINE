@@ -222,6 +222,66 @@ class ActivityGraphService:
                 or event.metadata.get("external_ip")
             )
 
+            # Ensure active device node is always represented if present on the event
+            if active_device:
+                dev_node_id = f"device:{active_device}"
+                has_dev_signal = any(s in ["unknown_device", "new_device", "device_anomaly"] for s in signals)
+                dev_risk = ActivityRiskLevel.UNUSUAL if has_dev_signal else ActivityRiskLevel.NORMAL
+                dev_reasons = ["New device or device anomaly"] if has_dev_signal else []
+                self._upsert_node(nodes_map, dev_node_id, NodeType.DEVICE, f"Device: {active_device}", dev_risk, event, signals, dev_reasons)
+                
+                # Link user -> device if not already linked
+                if not any(e.source == user_node_id and e.target == dev_node_id for e in edges_list):
+                    dev_edge = self._create_edge(
+                        source=user_node_id,
+                        target=dev_node_id,
+                        relationship=RelationshipType.USER_USED_DEVICE,
+                        risk_level=dev_risk,
+                        signals=[s for s in ["unknown_device", "new_device", "device_anomaly"] if s in signals],
+                        reasons=dev_reasons,
+                        timestamp=event.timestamp,
+                        seq_order=sequence_counter,
+                        event=event,
+                        incident_id=incident_id,
+                    )
+                    edges_list.append(dev_edge)
+                    sequence_counter += 1
+
+            # Ensure active IP node is always represented if present on the event
+            if ip_val:
+                ip_node_id = f"ip:{ip_val}"
+                has_ip_signal = any(
+                    s in ["new_ip", "impossible_travel", "suspicious_external_ip", "brute_force_login", "credential_stuffing"]
+                    for s in signals
+                ) or event.metadata.get("is_new_ip") or event.metadata.get("is_suspicious_ip")
+                ip_risk = (
+                    ActivityRiskLevel.HIGH_RISK
+                    if any(s in ["suspicious_external_ip", "brute_force_login", "credential_stuffing"] for s in signals)
+                    else (ActivityRiskLevel.UNUSUAL if has_ip_signal else ActivityRiskLevel.NORMAL)
+                )
+                ip_reasons = [r for r in reasons if "IP" in r or "ip" in r or "External" in r or "attack" in r] or (
+                    ["External origin IP"] if has_ip_signal else []
+                )
+                self._upsert_node(nodes_map, ip_node_id, NodeType.IP, f"IP: {ip_val}", ip_risk, event, signals, ip_reasons)
+
+                src = f"device:{active_device}" if active_device else user_node_id
+                rel = RelationshipType.DEVICE_CONNECTED_FROM_IP if active_device else RelationshipType.EXTERNAL_SOURCE
+                if not any(e.source == src and e.target == ip_node_id for e in edges_list):
+                    ip_edge = self._create_edge(
+                        source=src,
+                        target=ip_node_id,
+                        relationship=rel,
+                        risk_level=ip_risk,
+                        signals=[s for s in ["new_ip", "impossible_travel"] if s in signals],
+                        reasons=ip_reasons,
+                        timestamp=event.timestamp,
+                        seq_order=sequence_counter,
+                        event=event,
+                        incident_id=incident_id,
+                    )
+                    edges_list.append(ip_edge)
+                    sequence_counter += 1
+
             # --- Entity Node & Edge Derivation by Event Type ---
 
             # A. LOGIN & AUTHENTICATION
@@ -272,78 +332,6 @@ class ActivityGraphService:
                     )
                 )
                 sequence_counter += 1
-
-                # If device is present in login
-                dev_node_id = None
-                if active_device:
-                    dev_node_id = f"device:{active_device}"
-                    has_dev_signal = any(s in ["unknown_device", "new_device", "device_anomaly"] for s in signals)
-                    dev_risk = ActivityRiskLevel.UNUSUAL if has_dev_signal else ActivityRiskLevel.NORMAL
-                    dev_reasons = ["New device or device anomaly"] if has_dev_signal else []
-                    self._upsert_node(nodes_map, dev_node_id, NodeType.DEVICE, f"Device: {active_device}", dev_risk, event, signals, dev_reasons)
-
-                    dev_edge = self._create_edge(
-                        source=user_node_id,
-                        target=dev_node_id,
-                        relationship=RelationshipType.USER_USED_DEVICE,
-                        risk_level=dev_risk,
-                        signals=[s for s in ["unknown_device", "new_device", "device_anomaly"] if s in signals],
-                        reasons=dev_reasons,
-                        timestamp=event.timestamp,
-                        seq_order=sequence_counter,
-                        event=event,
-                        incident_id=incident_id,
-                    )
-                    edges_list.append(dev_edge)
-                    sequence_counter += 1
-
-                # If IP address is present in login
-                if ip_val:
-                    ip_node_id = f"ip:{ip_val}"
-                    has_ip_signal = any(
-                        s in ["new_ip", "impossible_travel", "suspicious_external_ip", "brute_force_login", "credential_stuffing"]
-                        for s in signals
-                    ) or event.metadata.get("is_new_ip") or event.metadata.get("is_suspicious_ip")
-                    ip_risk = (
-                        ActivityRiskLevel.HIGH_RISK
-                        if any(s in ["suspicious_external_ip", "brute_force_login", "credential_stuffing"] for s in signals)
-                        else (ActivityRiskLevel.UNUSUAL if has_ip_signal else ActivityRiskLevel.NORMAL)
-                    )
-                    ip_reasons = [r for r in reasons if "IP" in r or "ip" in r or "External" in r or "attack" in r] or (
-                        ["External origin IP"] if has_ip_signal else []
-                    )
-                    self._upsert_node(nodes_map, ip_node_id, NodeType.IP, f"IP: {ip_val}", ip_risk, event, signals, ip_reasons)
-
-                    if dev_node_id:
-                        ip_edge = self._create_edge(
-                            source=dev_node_id,
-                            target=ip_node_id,
-                            relationship=RelationshipType.DEVICE_CONNECTED_FROM_IP,
-                            risk_level=ip_risk,
-                            signals=[s for s in ["new_ip", "impossible_travel"] if s in signals],
-                            reasons=ip_reasons,
-                            timestamp=event.timestamp,
-                            seq_order=sequence_counter,
-                            event=event,
-                            incident_id=incident_id,
-                        )
-                        edges_list.append(ip_edge)
-                    else:
-                        rel = RelationshipType.TARGETED if is_failed else RelationshipType.EXTERNAL_SOURCE
-                        ext_edge = self._create_edge(
-                            source=ip_node_id,
-                            target=user_node_id,
-                            relationship=rel,
-                            risk_level=ip_risk,
-                            signals=signals,
-                            reasons=ip_reasons,
-                            timestamp=event.timestamp,
-                            seq_order=sequence_counter,
-                            event=event,
-                            incident_id=incident_id,
-                        )
-                        edges_list.append(ext_edge)
-                    sequence_counter += 1
 
                 # If session_id present in login
                 if sess_id:
