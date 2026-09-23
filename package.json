@@ -1,0 +1,11 @@
+{
+  "name": "techfusion-ai-security-engine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TechFusion Autonomous AI SOC & Security Engine",
+  "scripts": {
+    "build": "npm --prefix frontend install && npm --prefix frontend run build",
+    "dev": "npm --prefix frontend run dev",
+    "start": "npm --prefix frontend run dev"
+  }
+}
