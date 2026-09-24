@@ -80,13 +80,28 @@ class ActivityGraphService:
             incidents = await self._find_user_incidents(uid, events)
             
             highest_risk = ActivityRiskLevel.NORMAL
+            has_resolved = False
+            has_contained = False
             for inc in incidents:
+                inc_status = (inc.status or "active").lower()
+                if inc_status in ["resolved", "mitigated", "recovered"] or (inc.risk_assessment and inc.risk_assessment.risk_score == 0):
+                    has_resolved = True
+                    continue
+                if inc_status == "contained":
+                    has_contained = True
+                    continue
                 if inc.risk_assessment:
                     lvl = inc.risk_assessment.risk_level.value.lower()
-                    if lvl == "critical" or lvl == "high":
+                    if lvl in ["critical", "high"]:
                         highest_risk = ActivityRiskLevel.HIGH_RISK
                     elif lvl == "moderate" and highest_risk != ActivityRiskLevel.HIGH_RISK:
                         highest_risk = ActivityRiskLevel.SUSPICIOUS
+
+            if highest_risk == ActivityRiskLevel.NORMAL:
+                if has_contained:
+                    highest_risk = ActivityRiskLevel.CONTAINED
+                elif has_resolved:
+                    highest_risk = ActivityRiskLevel.RESOLVED
 
             summaries.append(
                 UserSummary(
@@ -170,6 +185,8 @@ class ActivityGraphService:
             type=NodeType.USER,
             label=f"User: {user_id}",
             risk_level=ActivityRiskLevel.NORMAL,
+            status="normal",
+            entity_id=user_id,
             first_seen=first_event_time,
             last_seen=last_event_time,
             event_ids=[e.id for e in events],
@@ -705,6 +722,114 @@ class ActivityGraphService:
                 edges_list.append(exfil_edge)
                 sequence_counter += 1
 
+        # Synchronize node and edge risk levels with authoritative incident status (Lifecycle & Severity decoupled)
+        for node in nodes_map.values():
+            node_incidents = [event_id_to_incident[eid] for eid in node.event_ids if eid in event_id_to_incident]
+            for inc in user_incidents:
+                if (inc.primary_entity == node.entity_id or getattr(inc, "entity_id", None) == node.entity_id) and inc not in node_incidents:
+                    node_incidents.append(inc)
+
+            for inc in node_incidents:
+                if inc.id not in node.incident_ids:
+                    node.incident_ids.append(inc.id)
+            if node.incident_ids and not node.incident_id:
+                node.incident_id = node.incident_ids[0]
+
+            if node_incidents:
+                active_incs = [i for i in node_incidents if (i.status or "active").lower() == "active"]
+                ack_incs = [i for i in node_incidents if (i.status or "").lower() == "acknowledged"]
+                contained_incs = [i for i in node_incidents if (i.status or "").lower() == "contained"]
+                resolved_incs = [
+                    i for i in node_incidents
+                    if (i.status or "").lower() in ["resolved", "mitigated"]
+                    or (i.risk_assessment and i.risk_assessment.risk_score == 0)
+                ]
+                recovered_incs = [i for i in node_incidents if (i.status or "").lower() == "recovered"]
+
+                def get_highest_sev(inc_list):
+                    rank_map = {"CRITICAL": 4, "HIGH": 3, "MODERATE": 2, "LOW": 1}
+                    max_rank = 1
+                    max_sev = "LOW"
+                    for inc in inc_list:
+                        s = (inc.risk_assessment.risk_level.value if inc.risk_assessment else "LOW").upper()
+                        r = rank_map.get(s, 1)
+                        if r > max_rank:
+                            max_rank = r
+                            max_sev = s
+                    return max_sev
+
+                if active_incs:
+                    node.incident_status = "ACTIVE"
+                    node.status = "active"
+                    node.severity = get_highest_sev(active_incs)
+                    if node.severity in ["CRITICAL", "HIGH"]:
+                        node.risk_level = ActivityRiskLevel.HIGH_RISK
+                    elif node.severity == "MODERATE" and node.risk_level != ActivityRiskLevel.HIGH_RISK:
+                        node.risk_level = ActivityRiskLevel.SUSPICIOUS
+                    # If LOW, keep node's own risk_level (e.g. UNUSUAL or NORMAL)
+                elif ack_incs:
+                    node.incident_status = "ACKNOWLEDGED"
+                    node.status = "acknowledged"
+                    node.severity = get_highest_sev(ack_incs)
+                    node.risk_level = ActivityRiskLevel.SUSPICIOUS
+                elif contained_incs:
+                    node.incident_status = "CONTAINED"
+                    node.status = "contained"
+                    node.severity = get_highest_sev(contained_incs)
+                    node.risk_level = ActivityRiskLevel.CONTAINED
+                elif resolved_incs:
+                    node.incident_status = "RESOLVED"
+                    node.status = "resolved"
+                    node.severity = "LOW"
+                    node.risk_level = ActivityRiskLevel.RESOLVED
+                elif recovered_incs:
+                    node.incident_status = "RECOVERED"
+                    node.status = "recovered"
+                    node.severity = "LOW"
+                    node.risk_level = ActivityRiskLevel.RESOLVED
+            else:
+                node.incident_status = "NORMAL"
+                node.status = "normal"
+                node.severity = "LOW"
+
+        for edge in edges_list:
+            edge_inc = event_id_to_incident.get(edge.event_id) or (
+                next((i for i in user_incidents if i.id == edge.incident_id), None) if edge.incident_id else None
+            )
+            if edge_inc:
+                edge.incident_id = edge_inc.id
+                inc_status = (edge_inc.status or "active").lower()
+                inc_sev = (edge_inc.risk_assessment.risk_level.value if edge_inc.risk_assessment else "LOW").upper()
+                edge.severity = inc_sev
+
+                if inc_status == "active":
+                    edge.incident_status = "ACTIVE"
+                    edge.status = "active"
+                    if inc_sev in ["CRITICAL", "HIGH"]:
+                        edge.risk_level = ActivityRiskLevel.HIGH_RISK
+                    elif inc_sev == "MODERATE" and edge.risk_level != ActivityRiskLevel.HIGH_RISK:
+                        edge.risk_level = ActivityRiskLevel.SUSPICIOUS
+                    # If LOW, preserve edge's own step risk_level
+                elif inc_status == "acknowledged":
+                    edge.incident_status = "ACKNOWLEDGED"
+                    edge.status = "acknowledged"
+                    edge.risk_level = ActivityRiskLevel.SUSPICIOUS
+                elif inc_status == "contained":
+                    edge.incident_status = "CONTAINED"
+                    edge.status = "contained"
+                    edge.risk_level = ActivityRiskLevel.CONTAINED
+                elif inc_status in ["resolved", "mitigated"] or (edge_inc.risk_assessment and edge_inc.risk_assessment.risk_score == 0):
+                    edge.incident_status = "RESOLVED"
+                    edge.status = "resolved"
+                    edge.risk_level = ActivityRiskLevel.RESOLVED
+                elif inc_status == "recovered":
+                    edge.incident_status = "RECOVERED"
+                    edge.status = "recovered"
+                    edge.risk_level = ActivityRiskLevel.RESOLVED
+            else:
+                edge.incident_status = "NORMAL"
+                edge.status = "normal"
+
         # 3. Overall User Risk Aggregation
         overall_risk_score, overall_risk_level = self._compute_overall_user_risk(
             dominant_signals=list(dominant_signals_set),
@@ -814,6 +939,21 @@ class ActivityGraphService:
             if context["summary"] not in reasons:
                 reasons.append(context["summary"])
 
+        # If this event belongs to a resolved or mitigated incident, classify as RESOLVED
+        for inc in incidents:
+            if event.id in inc.event_ids:
+                inc_status = (inc.status or "active").lower()
+                if inc_status in ["resolved", "mitigated", "recovered"] or (
+                    inc.risk_assessment and inc.risk_assessment.risk_score == 0
+                ):
+                    return ActivityRiskLevel.RESOLVED, [
+                        f"Event verified benign or recovered. Incident '{inc.id}' is resolved."
+                    ]
+                if inc_status == "contained":
+                    return ActivityRiskLevel.CONTAINED, [
+                        f"Threat contained. Incident '{inc.id}' containment active."
+                    ]
+
         # Check for Critical/High-risk signals
         critical_signals = {
             "unexpected_tool_usage", "privilege_escalation", "abnormal_event_sequence",
@@ -836,7 +976,7 @@ class ActivityGraphService:
             return ActivityRiskLevel.HIGH_RISK, reasons
         elif has_suspicious:
             # If corroborating signals exist or incident is active
-            if any(inc.risk_assessment and inc.risk_assessment.risk_score >= 60 for inc in incidents):
+            if any(inc.risk_assessment and inc.risk_assessment.risk_score >= 60 for inc in incidents if inc.status not in ["resolved", "mitigated"]):
                 return ActivityRiskLevel.HIGH_RISK, reasons
             return ActivityRiskLevel.SUSPICIOUS, reasons
         elif only_weak_signals:
@@ -855,10 +995,31 @@ class ActivityGraphService:
         if not dominant_signals and not incidents:
             return 0, ActivityRiskLevel.NORMAL
 
-        # If incidents exist, use highest incident score as baseline
+        active_incidents = [
+            inc for inc in incidents
+            if (inc.status or "active").lower() not in ["resolved", "mitigated", "recovered", "contained"]
+        ]
+        contained_incidents = [
+            inc for inc in incidents
+            if (inc.status or "").lower() == "contained"
+        ]
+        resolved_incidents = [
+            inc for inc in incidents
+            if (inc.status or "").lower() in ["resolved", "mitigated", "recovered"]
+            or (inc.risk_assessment and inc.risk_assessment.risk_score == 0)
+        ]
+
+        if not active_incidents:
+            if contained_incidents:
+                return 15, ActivityRiskLevel.CONTAINED
+            if resolved_incidents:
+                return 0, ActivityRiskLevel.RESOLVED
+            return 0, ActivityRiskLevel.NORMAL
+
+        # If active incidents exist, use highest active incident score as baseline
         incident_scores = [
             inc.risk_assessment.risk_score
-            for inc in incidents
+            for inc in active_incidents
             if inc.risk_assessment is not None
         ]
         max_inc_score = max(incident_scores) if incident_scores else 0
@@ -894,14 +1055,21 @@ class ActivityGraphService:
         event: SecurityEvent,
         signals: List[str],
         reasons: List[str],
+        incident_id: Optional[str] = None,
+        entity_id: Optional[str] = None,
     ):
         """Creates or updates a node in the graph map."""
+        resolved_entity_id = entity_id or (node_id.split(":", 1)[1] if ":" in node_id else node_id)
         if node_id not in nodes_map:
             nodes_map[node_id] = GraphNode(
                 id=node_id,
                 type=node_type,
                 label=label,
                 risk_level=risk_level,
+                status="normal",
+                entity_id=resolved_entity_id,
+                incident_id=incident_id,
+                incident_ids=[incident_id] if incident_id else [],
                 first_seen=event.timestamp,
                 last_seen=event.timestamp,
                 event_ids=[event.id],
@@ -913,6 +1081,12 @@ class ActivityGraphService:
         else:
             node = nodes_map[node_id]
             node.last_seen = max(node.last_seen, event.timestamp)
+            if not node.entity_id:
+                node.entity_id = resolved_entity_id
+            if incident_id and incident_id not in node.incident_ids:
+                node.incident_ids.append(incident_id)
+            if not node.incident_id and incident_id:
+                node.incident_id = incident_id
             if event.id not in node.event_ids:
                 node.event_ids.append(event.id)
             if event.event_type not in node.event_types:
@@ -960,8 +1134,10 @@ class ActivityGraphService:
     def _risk_rank(self, level: ActivityRiskLevel) -> int:
         ranks = {
             ActivityRiskLevel.NORMAL: 0,
-            ActivityRiskLevel.UNUSUAL: 1,
-            ActivityRiskLevel.SUSPICIOUS: 2,
-            ActivityRiskLevel.HIGH_RISK: 3,
+            ActivityRiskLevel.RESOLVED: 1,
+            ActivityRiskLevel.CONTAINED: 2,
+            ActivityRiskLevel.UNUSUAL: 3,
+            ActivityRiskLevel.SUSPICIOUS: 4,
+            ActivityRiskLevel.HIGH_RISK: 5,
         }
         return ranks.get(level, 0)

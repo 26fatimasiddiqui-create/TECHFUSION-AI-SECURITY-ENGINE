@@ -43,6 +43,8 @@ class ActivityRiskLevel(str, Enum):
     UNUSUAL = "unusual"
     SUSPICIOUS = "suspicious"
     HIGH_RISK = "high-risk"
+    RESOLVED = "resolved"
+    CONTAINED = "contained"
 
 
 class GraphNode(BaseModel):
@@ -50,6 +52,12 @@ class GraphNode(BaseModel):
     type: NodeType
     label: str
     risk_level: ActivityRiskLevel = ActivityRiskLevel.NORMAL
+    status: str = "normal"  # active, acknowledged, contained, resolved, recovered, normal
+    incident_status: Optional[str] = None
+    severity: Optional[str] = None  # LOW, MODERATE, HIGH, CRITICAL
+    entity_id: Optional[str] = None
+    incident_id: Optional[str] = None
+    incident_ids: List[str] = Field(default_factory=list)
     first_seen: datetime
     last_seen: datetime
     event_ids: List[str] = Field(default_factory=list)
@@ -65,6 +73,9 @@ class GraphEdge(BaseModel):
     target: str
     relationship: RelationshipType
     risk_level: ActivityRiskLevel = ActivityRiskLevel.NORMAL
+    status: str = "normal"  # active, acknowledged, contained, resolved, recovered, normal
+    incident_status: Optional[str] = None
+    severity: Optional[str] = None  # LOW, MODERATE, HIGH, CRITICAL
     signals: List[str] = Field(default_factory=list)
     reasons: List[str] = Field(default_factory=list)
     timestamp: datetime

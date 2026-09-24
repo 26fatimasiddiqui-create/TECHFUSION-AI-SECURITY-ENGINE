@@ -5,6 +5,8 @@ from app.services.risk_service import RiskService
 from app.services.alert_service import AlertService
 from app.services.activity_graph_service import ActivityGraphService
 from app.services.response_service import ResponseService
+from app.services.agent_security_service import AgentSecurityService
+from app.services.external_threat_service import ExternalThreatService
 from app.repositories.supabase_repository import SupabaseRepository
 
 supabase_repository = SupabaseRepository()
@@ -13,7 +15,9 @@ detection_service = DetectionService()
 correlation_service = CorrelationService()
 cognee_service = CogneeService()
 risk_service = RiskService()
-alert_service = AlertService(repo=supabase_repository, response_svc=response_service)
+agent_security_service = AgentSecurityService()
+external_threat_service = ExternalThreatService()
+alert_service = AlertService(repo=supabase_repository, response_svc=response_service, correlation_svc=correlation_service)
 activity_graph_service = ActivityGraphService(
     repo=supabase_repository,
     detection_svc=detection_service,
@@ -37,6 +41,14 @@ def get_cognee_service() -> CogneeService:
 
 def get_risk_service() -> RiskService:
     return risk_service
+
+
+def get_agent_security_service() -> AgentSecurityService:
+    return agent_security_service
+
+
+def get_external_threat_service() -> ExternalThreatService:
+    return external_threat_service
 
 
 def get_alert_service() -> AlertService:

@@ -39,6 +39,7 @@ app.include_router(response_router)
 
 
 @app.get("/health", tags=["system"])
+@app.get("/api/health", tags=["system"])
 async def health_check():
     """Health check endpoint displaying system operational status and integrations."""
     return {

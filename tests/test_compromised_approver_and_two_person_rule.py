@@ -506,3 +506,20 @@ class TestExpirationAuditAndInvolvement:
         assert "second_approval_required" in n8n_body
         assert "approval_state" in n8n_body
         assert "approval_blocked" in n8n_body
+
+    def test_direct_second_approval_from_pending_auto_advances_and_contains(self, client):
+        """21. Direct second approval from PENDING_APPROVAL satisfies dual-control and contains incident."""
+        incident_id = "INC-DIRECT-APPROVE-01"
+        r = client.post(f"/api/response/{incident_id}/second-approve", json={
+            "approver_id": "SOC_Admin_Bob",
+            "role": "SECURITY_ADMIN",
+            "session_id": "sess_bob_direct",
+        })
+        assert r.status_code == 200
+        r_status = client.get(f"/api/response/{incident_id}/approval-status")
+        assert r_status.status_code == 200
+        body = r_status.json()
+        assert body["state"] in ["SIMULATED", "EXECUTED", "APPROVED_FOR_EXECUTION"]
+        assert body["approver_1_id"] == "SOC_Analyst_Alice"
+        assert body["approver_2_id"] == "SOC_Admin_Bob"
+

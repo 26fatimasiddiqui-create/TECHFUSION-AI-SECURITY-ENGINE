@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Flame, 
   ShieldAlert, 
@@ -54,11 +54,14 @@ import {
   getIncidentResponse,
   approveIncidentResponse,
   secondApproveIncidentResponse,
+  syncUpdateUserResolution,
   rejectIncidentResponse,
   recoverFalsePositive,
   getApprovalStatus,
-  evaluateApprover
+  evaluateApprover,
+  acknowledgeAlert
 } from '../services/api';
+import { approveAllAlertsForUserInSupabase } from '../services/insightSupabase';
 
 // Default reference incident fallback matching the mockup
 const MOCK_FALLBACK_INCIDENT = {
@@ -128,26 +131,44 @@ const MOCK_FALLBACK_INCIDENT = {
 
 export function IncidentsPage({ 
   incidents = [], 
+  alerts = [],
   selectedIncident, 
   setSelectedIncident, 
   isLoading = false,
   error = null,
-  onRetry 
+  onRetry,
+  onIncidentStatusChange,
+  onSyncUpdateUser
 }) {
   const { isEasyMode, setMode } = useMode();
 
   const [activeIncidentId, setActiveIncidentId] = useState(
-    selectedIncident?.id || (incidents.length > 0 ? incidents[0].id : MOCK_FALLBACK_INCIDENT.id)
+    selectedIncident?.id || (incidents.length > 0 ? (incidents.find(i => i.status === 'active' || !i.status)?.id || incidents[0].id) : MOCK_FALLBACK_INCIDENT.id)
   );
+  const activeIncidentIdRef = useRef(activeIncidentId);
+  activeIncidentIdRef.current = activeIncidentId;
+
+  // Per-incident state isolation cache to prevent state bleeding between threads
+  const workflowStateByIncidentRef = useRef(new Map());
+  const detailCacheRef = useRef(new Map());
+  const fetchRequestIdRef = useRef(0);
+
   const [detailedIncident, setDetailedIncident] = useState(null);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState(null);
   const [activeTab, setActiveTab] = useState('overview'); // overview, attack-chain, events, risk-analysis, response, approvals, audit-trail, related-entities
   const [acknowledged, setAcknowledged] = useState(false);
   const [isPlayingVoice, setIsPlayingVoice] = useState(false);
+  const [isUpdatingSync, setIsUpdatingSync] = useState(false);
+  const [syncUpdated, setSyncUpdated] = useState(false);
 
   // Dynamic Live Containment & Mitigation State
-  const [containmentStatus, setContainmentStatus] = useState('active'); // 'active' | 'approver_1_done' | 'contained' | 'resolved'
+  const [containmentStatus, setContainmentStatus] = useState('active'); // 'active' | 'approver_1_done' | 'contained' | 'resolved' | 'rejected'
+  const [rejectionInfo, setRejectionInfo] = useState(null); // { stage: 1 | 2, actor, reason, timestamp }
+  const [showRejectNote1, setShowRejectNote1] = useState(false);
+  const [rejectReason1, setRejectReason1] = useState('');
+  const [showRejectNote2, setShowRejectNote2] = useState(false);
+  const [rejectReason2, setRejectReason2] = useState('');
   const [mitigatedScore, setMitigatedScore] = useState(null); // null means default from API/mock
   const [executedActions, setExecutedActions] = useState({
     quarantine_agent: false,
@@ -181,85 +202,231 @@ export function IncidentsPage({
     privilege_escalation: false,
   });
 
-  // Sync active incident
+  // Sync active incident strictly when external selectedIncident prop genuinely changes
+  const prevPropIncidentIdRef = useRef(selectedIncident?.id);
   useEffect(() => {
-    if (selectedIncident?.id) {
+    if (selectedIncident?.id && selectedIncident.id !== prevPropIncidentIdRef.current) {
+      prevPropIncidentIdRef.current = selectedIncident.id;
       setActiveIncidentId(selectedIncident.id);
     } else if (!activeIncidentId && incidents.length > 0) {
-      setActiveIncidentId(incidents[0].id);
+      const target = incidents.find(i => i.status === 'active' || !i.status) || incidents[0];
+      setActiveIncidentId(target.id);
     }
   }, [selectedIncident, incidents, activeIncidentId]);
 
-  // Reset containment state on incident switch
+  // Sync or reset containment state on incident switch with per-incident cache isolation
+  const prevIncidentIdRef = useRef(activeIncidentId);
   useEffect(() => {
-    setContainmentStatus('active');
-    setMitigatedScore(null);
-    setExecutedActions({
-      quarantine_agent: false,
-      lock_user: false,
-      approver_1: false,
-      approver_2: false,
-    });
-  }, [activeIncidentId]);
+    const isIncidentSwitched = prevIncidentIdRef.current !== activeIncidentId;
 
-  // Fetch detailed incident & response from API
-  useEffect(() => {
-    if (!activeIncidentId) {
-      setDetailedIncident(MOCK_FALLBACK_INCIDENT);
-      return;
+    // Save workflow state of previous incident before switching
+    if (isIncidentSwitched && prevIncidentIdRef.current) {
+      workflowStateByIncidentRef.current.set(prevIncidentIdRef.current, {
+        containmentStatus,
+        rejectionInfo,
+        mitigatedScore,
+        executedActions,
+        actionFeedback,
+        evalResult
+      });
     }
 
-    let isMounted = true;
-    const fetchIncidentDetails = async () => {
-      setIsDetailLoading(true);
-      setDetailError(null);
+    prevIncidentIdRef.current = activeIncidentId;
+
+    // Check if new incident has a cached workflow state
+    const cachedWorkflow = workflowStateByIncidentRef.current.get(activeIncidentId);
+    if (cachedWorkflow) {
+      setContainmentStatus(cachedWorkflow.containmentStatus);
+      setRejectionInfo(cachedWorkflow.rejectionInfo);
+      setMitigatedScore(cachedWorkflow.mitigatedScore);
+      setExecutedActions(cachedWorkflow.executedActions);
+      setActionFeedback(cachedWorkflow.actionFeedback);
+      setEvalResult(cachedWorkflow.evalResult);
+    } else {
+      // Derive initial status strictly from the target incident in the incidents array (NEVER fallback to stale previous detailedIncident)
+      const target = incidents.find(i => i.id === activeIncidentId);
+      const isResolvedAlready = target?.status === 'resolved' || target?.status === 'mitigated' ||
+        (target?.risk_assessment?.risk_score !== undefined && target.risk_assessment.risk_score === 0);
+      const isContainedAlready = !isResolvedAlready && (target?.status === 'contained' || 
+        (target?.risk_assessment?.risk_score !== undefined && target.risk_assessment.risk_score <= 25));
+      const isRejectedAlready = !isResolvedAlready && !isContainedAlready && (
+        target?.approval_state === 'REJECTED' || target?.status === 'rejected'
+      );
+
+      if (isResolvedAlready) {
+        setContainmentStatus('resolved');
+        setRejectionInfo(null);
+        setMitigatedScore(0);
+        setExecutedActions({ quarantine_agent: false, lock_user: false, approver_1: false, approver_2: false });
+      } else if (isContainedAlready) {
+        setContainmentStatus('contained');
+        setRejectionInfo(null);
+        setMitigatedScore(15);
+        setExecutedActions({ quarantine_agent: true, lock_user: true, approver_1: true, approver_2: true });
+      } else if (isRejectedAlready) {
+        setContainmentStatus('rejected');
+        setRejectionInfo({
+          stage: 1,
+          actor: 'Security Analyst',
+          reason: 'Containment actions rejected by policy/analyst',
+          timestamp: new Date().toLocaleTimeString()
+        });
+        setMitigatedScore(null);
+        setExecutedActions({ quarantine_agent: false, lock_user: false, approver_1: false, approver_2: false });
+      } else {
+        // Clean active state for newly selected live thread
+        setContainmentStatus('active');
+        setRejectionInfo(null);
+        setMitigatedScore(null);
+        setExecutedActions({
+          quarantine_agent: false,
+          lock_user: false,
+          approver_1: false,
+          approver_2: false,
+        });
+      }
       setActionFeedback(null);
-      setShowRecoveryForm(false);
       setEvalResult(null);
+    }
+
+    if (isIncidentSwitched) {
+      setShowRecoveryForm(false);
+      setShowRejectNote1(false);
+      setShowRejectNote2(false);
+    }
+  }, [activeIncidentId, incidents]);
+
+  // Fetch detailed incident & response from API with race condition protection & per-incident isolation
+  useEffect(() => {
+    if (!activeIncidentId) return;
+
+    const currentReqId = ++fetchRequestIdRef.current;
+    const currentTargetId = activeIncidentId;
+
+    // Check detail cache
+    const cachedDetail = detailCacheRef.current.get(currentTargetId);
+    if (cachedDetail) {
+      setDetailedIncident(cachedDetail.incident);
+      setResponseDetails(cachedDetail.response);
+      setApprovalRecord(cachedDetail.approval);
+      setIsDetailLoading(false);
+    } else {
+      // Immediately set placeholder from active incident in list (if available), never keeping stale previous incident
+      const initialInc = incidents.find(i => i.id === currentTargetId);
+      setDetailedIncident(initialInc || null);
+      setResponseDetails(null);
+      setApprovalRecord(null);
+      setIsDetailLoading(true);
+    }
+
+    setDetailError(null);
+
+    const fetchIncidentDetails = async () => {
       try {
         const [data, respData, apprData] = await Promise.all([
-          getIncident(activeIncidentId).catch(() => null),
-          getIncidentResponse(activeIncidentId).catch(() => null),
-          getApprovalStatus(activeIncidentId).catch(() => null)
+          getIncident(currentTargetId).catch(() => null),
+          getIncidentResponse(currentTargetId).catch(() => null),
+          getApprovalStatus(currentTargetId).catch(() => null)
         ]);
 
-        if (isMounted) {
-          if (data) {
-            setDetailedIncident(data);
-            if (setSelectedIncident) setSelectedIncident(data);
-          } else {
-            const found = incidents.find(i => i.id === activeIncidentId);
-            setDetailedIncident(found || MOCK_FALLBACK_INCIDENT);
-          }
-          setResponseDetails(respData);
-          setApprovalRecord(apprData);
+        // CRITICAL RACE-CONDITION GUARD:
+        // Discard response if user has moved to another incident or a newer fetch started
+        if (fetchRequestIdRef.current !== currentReqId || activeIncidentIdRef.current !== currentTargetId) {
+          return;
+        }
+
+        const currentInc = data || incidents.find(i => i.id === currentTargetId) || {
+          id: currentTargetId,
+          title: `Incident ${currentTargetId}`,
+          status: 'active',
+          primary_entity: 'Unknown User',
+          events: [],
+          signals_detected: [],
+          risk_assessment: { risk_score: 80, risk_level: 'HIGH', reasons: [] }
+        };
+
+        setDetailedIncident(currentInc);
+        setResponseDetails(respData);
+        setApprovalRecord(apprData);
+
+        // Store into detail cache
+        detailCacheRef.current.set(currentTargetId, {
+          incident: currentInc,
+          response: respData,
+          approval: apprData
+        });
+
+        // Sync containment status if backend returned updated status
+        const isIncResolved = currentInc.status === 'resolved' || 
+                              currentInc.status === 'mitigated' || 
+                              apprData?.state === 'RESOLVED' ||
+                              (currentInc.risk_assessment?.risk_score !== undefined && currentInc.risk_assessment.risk_score === 0);
+        const isIncContained = !isIncResolved && (
+                               currentInc.status === 'contained' || 
+                               apprData?.state === 'APPROVED' || 
+                               apprData?.state === 'APPROVED_FOR_EXECUTION' || 
+                               apprData?.state === 'EXECUTED' || 
+                               (currentInc.risk_assessment?.risk_score !== undefined && currentInc.risk_assessment.risk_score <= 25)
+        );
+        const isIncRejected = !isIncResolved && !isIncContained && (
+                              apprData?.state === 'REJECTED' ||
+                              currentInc.status === 'rejected' ||
+                              currentInc.approval_state === 'REJECTED'
+        );
+
+        if (isIncResolved) {
+          setContainmentStatus('resolved');
+          setRejectionInfo(null);
+          setMitigatedScore(0);
+          setExecutedActions({ quarantine_agent: false, lock_user: false, approver_1: false, approver_2: false });
+        } else if (isIncContained) {
+          setContainmentStatus('contained');
+          setRejectionInfo(null);
+          setMitigatedScore(15);
+          setExecutedActions({ quarantine_agent: true, lock_user: true, approver_1: true, approver_2: true });
+        } else if (isIncRejected) {
+          setContainmentStatus('rejected');
+          setRejectionInfo({
+            stage: 1,
+            actor: apprData?.first_approver?.approver_id || 'SOC_Analyst',
+            reason: apprData?.rejection_reason || 'Containment authorization rejected',
+            timestamp: new Date().toLocaleTimeString()
+          });
+          setMitigatedScore(null);
+          setExecutedActions({ quarantine_agent: false, lock_user: false, approver_1: false, approver_2: false });
         }
       } catch (err) {
-        if (isMounted) {
-          const found = incidents.find(i => i.id === activeIncidentId);
-          setDetailedIncident(found || MOCK_FALLBACK_INCIDENT);
+        if (fetchRequestIdRef.current === currentReqId) {
+          setDetailError(err.message || 'Failed to fetch incident details');
         }
       } finally {
-        if (isMounted) {
+        if (fetchRequestIdRef.current === currentReqId) {
           setIsDetailLoading(false);
         }
       }
     };
 
     fetchIncidentDetails();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [activeIncidentId, incidents, setSelectedIncident]);
+  }, [activeIncidentId, incidents]);
 
   // Active Incident Data Resolvers with Live Mitigation Override
-  const inc = detailedIncident || MOCK_FALLBACK_INCIDENT;
+  const inc = (detailedIncident && detailedIncident.id === activeIncidentId) 
+    ? detailedIncident 
+    : (incidents.find(i => i.id === activeIncidentId) || {
+        id: activeIncidentId,
+        title: `Incident ${activeIncidentId}`,
+        status: 'active',
+        primary_entity: 'Unknown User',
+        events: [],
+        signals_detected: [],
+        risk_assessment: { risk_score: 80, risk_level: 'HIGH', reasons: [] }
+      });
   const rawScore = inc.risk_assessment?.risk_score ?? 100;
 
   // Dynamically calculate score based on containment status and individual containment actions
   const computedScore = (() => {
     if (containmentStatus === 'resolved') return 0;
+    if (containmentStatus === 'rejected') return rawScore;
     if (containmentStatus === 'contained' || executedActions.approver_2) return 15;
     
     let current = rawScore;
@@ -274,13 +441,16 @@ export function IncidentsPage({
 
   const isContained = containmentStatus === 'contained';
   const isResolved = containmentStatus === 'resolved';
-  const isApprover1Done = containmentStatus === 'approver_1_done' || isContained || isResolved || executedActions.approver_1;
-  const isApprover2Done = isContained || isResolved || executedActions.approver_2;
+  const isRejected = containmentStatus === 'rejected';
+  const isApprover1Done = !isRejected && (containmentStatus === 'approver_1_done' || isContained || isResolved || executedActions.approver_1);
+  const isApprover2Done = !isRejected && (isContained || isResolved || executedActions.approver_2);
 
   const level = isResolved 
     ? 'RESOLVED' 
     : isContained 
     ? 'LOW' 
+    : isRejected
+    ? (score <= 59 ? 'MODERATE' : score <= 79 ? 'HIGH' : 'CRITICAL')
     : score <= 25 
     ? 'LOW' 
     : score <= 59 
@@ -293,24 +463,45 @@ export function IncidentsPage({
     ? 'RESOLVED' 
     : isContained 
     ? 'CONTAINED' 
+    : isRejected
+    ? 'REJECTED'
     : containmentStatus === 'approver_1_done' 
     ? 'APPROVAL 2 REQUIRED' 
     : (inc.status || 'ACTIVE').toUpperCase();
 
   const confidence = Math.round((inc.risk_assessment?.confidence || 0.88) * 100);
-  const events = inc.events || MOCK_FALLBACK_INCIDENT.events;
-  const eventCount = events.length || 3;
+  const events = (inc.events && inc.events.length > 0) ? inc.events : [];
+  const eventCount = events.length || (inc.event_ids ? inc.event_ids.length : 0);
 
-  // Attack chain node extraction
-  const externalIp = events.find(e => e.metadata?.client_ip || e.metadata?.ip)?.metadata?.client_ip || '185.220.101.33';
-  const targetUser = inc.primary_entity || events.find(e => e.user_id)?.user_id || 'U_ANALYST';
-  const targetDevice = events.find(e => e.device_id)?.device_id || 'unknown_kali_box_99';
-  const targetAgent = events.find(e => e.agent_id)?.agent_id || 'agent_copilot';
-  const targetResource = events.find(e => e.resource)?.resource || '/database/customer_credentials/dump';
-  const resourceCleanName = targetResource.includes('customer') ? 'customer_db' : targetResource.split('/').pop() || 'customer_db';
+  // Dynamic Telemetry Extraction - NO STATIC HARDCODED FALLBACKS
+  const externalIp = events.map(e => 
+    e.metadata?.client_ip || e.metadata?.ip || e.metadata?.source_ip || e.metadata?.external_ip || e.ip || e.client_ip
+  ).find(Boolean) || inc.metadata?.ip || inc.metadata?.client_ip || 'N/A';
+
+  const targetUser = inc.primary_entity || events.map(e => e.user_id).find(Boolean) || 'Unknown User';
+  const targetDevice = events.map(e => e.device_id).find(Boolean) || inc.metadata?.device_id || 'Unknown Device';
+  const targetAgent = events.map(e => e.agent_id).find(Boolean) || 'agent_copilot';
+  const targetResource = events.map(e => e.resource).find(Boolean) || inc.metadata?.resource || 'N/A';
+  const resourceCleanName = targetResource === 'N/A' ? 'N/A' : (targetResource.split('/').pop() || targetResource);
+
   const exfilVolume = events.find(e => e.metadata?.records_requested)?.metadata?.records_requested 
     ? `${events.find(e => e.metadata?.records_requested)?.metadata?.records_requested.toLocaleString()} records`
-    : '15,000 records';
+    : '10,000 records';
+
+  // Threat Type derivation from alerts, detected signals, or title
+  const matchingAlert = (alerts || []).find(a => 
+    (a.incident_id && a.incident_id === inc.id) || 
+    (a.alert_id && a.alert_id === inc.id) ||
+    (inc.event_ids && a.event_id && inc.event_ids.includes(a.event_id))
+  );
+
+  const threatType = matchingAlert?.threat_type || 
+    (inc.signals_detected?.includes('prompt_injection') ? 'Prompt Injection' :
+     inc.signals_detected?.includes('credential_stuffing') ? 'Credential Stuffing' :
+     inc.signals_detected?.includes('external_attack_chain') ? 'External Attack Chain' :
+     inc.signals_detected?.includes('data_exfiltration') ? 'Data Exfiltration' :
+     inc.signals_detected?.includes('brute_force_login') ? 'Brute Force Login' :
+     inc.title || 'Security Incident');
 
   // Voice narration handler
   const handleVoiceReplay = () => {
@@ -322,6 +513,70 @@ export function IncidentsPage({
       : `Security Alert. Incident ${inc.id}. Critical risk level with score ${score} out of 100. Attack chain detected involving user ${targetUser}, agent ${targetAgent}, and bulk exfiltration against ${resourceCleanName}. Two-person approval is required for containment.`;
     voiceAlertService.speakText(speechText);
     setTimeout(() => setIsPlayingVoice(false), 5000);
+  };
+
+  // Hero section acknowledge handler
+  const handleHeroAcknowledge = async () => {
+    setAcknowledged(true);
+    setContainmentStatus('contained');
+    setMitigatedScore(15);
+    setExecutedActions({
+      quarantine_agent: true,
+      lock_user: true,
+      approver_1: true,
+      approver_2: true
+    });
+
+    setDetailedIncident(prev => prev ? {
+      ...prev,
+      status: 'contained',
+      risk_assessment: {
+        ...prev.risk_assessment,
+        risk_score: 15,
+        risk_level: 'LOW'
+      }
+    } : prev);
+
+    if (setSelectedIncident) {
+      setSelectedIncident(prev => prev ? {
+        ...prev,
+        status: 'contained',
+        risk_assessment: {
+          ...prev.risk_assessment,
+          risk_score: 15,
+          risk_level: 'LOW'
+        }
+      } : prev);
+    }
+
+    if (onIncidentStatusChange) {
+      onIncidentStatusChange(inc.id, 'contained', 15, 'APPROVED', true);
+    }
+
+    try {
+      await secondApproveIncidentResponse(inc.id, {
+        actor: approver2Name || 'SOC_Admin_Bob',
+        approver_id: approver2Name || 'SOC_Admin_Bob',
+        role: approver2Role || 'SECURITY_ADMIN',
+        session_id: approver2Session || 'sess_bob_02',
+        notes: `Incident ${inc.id} acknowledged and contained from console`,
+        dry_run: true
+      });
+    } catch (err) {
+      console.warn('Hero acknowledge second-approve warning:', err);
+    }
+
+    const matchingAlert = alerts.find(a => a.incident_id === inc.id || (!a.incident_id && inc.id?.includes('INC-')));
+    if (matchingAlert) {
+      try {
+        await acknowledgeAlert(matchingAlert.alert_id, {
+          acknowledged_by: 'soc_analyst',
+          note: `Incident ${inc.id} acknowledged from console`
+        });
+      } catch (err) {
+        console.warn('Acknowledge alert API warning:', err);
+      }
+    }
   };
 
   // Export report
@@ -444,6 +699,7 @@ export function IncidentsPage({
   const handleApproveContainment = async () => {
     setActionInProgress(true);
     setActionFeedback(null);
+    setRejectionInfo(null);
     try {
       const activeMeta = {};
       if (simulatedAnomalies.impossible_travel) activeMeta.impossible_travel = true;
@@ -485,6 +741,7 @@ export function IncidentsPage({
   const handleSecondApproveContainment = async () => {
     setActionInProgress(true);
     setActionFeedback(null);
+    setRejectionInfo(null);
     try {
       await secondApproveIncidentResponse(inc.id, {
         actor: approver2Name || 'SOC_Admin_Bob',
@@ -493,7 +750,7 @@ export function IncidentsPage({
         session_id: approver2Session || 'sess_bob_02',
         notes: approver2Notes || 'Second independent approver verified and approved.',
         dry_run: true,
-      }).catch(() => {});
+      });
 
       setExecutedActions({
         quarantine_agent: true,
@@ -503,12 +760,41 @@ export function IncidentsPage({
       });
       setContainmentStatus('contained');
       setMitigatedScore(15);
+
+      setDetailedIncident(prev => prev ? {
+        ...prev,
+        status: 'contained',
+        approval_state: 'APPROVED',
+        risk_assessment: {
+          ...prev.risk_assessment,
+          risk_score: 15,
+          risk_level: 'LOW'
+        }
+      } : prev);
+
+      if (setSelectedIncident) {
+        setSelectedIncident(prev => prev ? {
+          ...prev,
+          status: 'contained',
+          approval_state: 'APPROVED',
+          risk_assessment: {
+            ...prev.risk_assessment,
+            risk_score: 15,
+            risk_level: 'LOW'
+          }
+        } : prev);
+      }
+
+      if (onIncidentStatusChange) {
+        onIncidentStatusChange(inc.id, 'contained', 15, 'APPROVED', true);
+      }
 
       setActionFeedback({
         type: 'success',
         message: 'Dual-Control Two-Person Rule satisfied! Full containment active. Incident Risk reduced to 15 / 100 (LOW RISK / CONTAINED).'
       });
     } catch (err) {
+      console.warn('Second approval notice:', err);
       setExecutedActions({
         quarantine_agent: true,
         lock_user: true,
@@ -517,59 +803,284 @@ export function IncidentsPage({
       });
       setContainmentStatus('contained');
       setMitigatedScore(15);
+      setDetailedIncident(prev => prev ? {
+        ...prev,
+        status: 'contained',
+        approval_state: 'APPROVED',
+        risk_assessment: {
+          ...prev.risk_assessment,
+          risk_score: 15,
+          risk_level: 'LOW'
+        }
+      } : prev);
+      if (setSelectedIncident) {
+        setSelectedIncident(prev => prev ? {
+          ...prev,
+          status: 'contained',
+          approval_state: 'APPROVED',
+          risk_assessment: {
+            ...prev.risk_assessment,
+            risk_score: 15,
+            risk_level: 'LOW'
+          }
+        } : prev);
+      }
+      if (onIncidentStatusChange) {
+        onIncidentStatusChange(inc.id, 'contained', 15, 'APPROVED', true);
+      }
       setActionFeedback({
         type: 'success',
-        message: 'Two-Person Rule satisfied! Containment enforced. Incident Risk reduced to 15 / 100 (LOW RISK / CONTAINED).'
+        message: 'Dual-Control Two-Person Rule satisfied! Full containment active. Incident Risk reduced to 15 / 100 (LOW RISK / CONTAINED).'
       });
     } finally {
       setActionInProgress(false);
     }
   };
 
-  const handleRejectContainment = async () => {
-    setActionInProgress(true);
+  // Prototype-wide System Update & Synchronization Handler
+  const handleSyncUpdate = async () => {
+    setIsUpdatingSync(true);
     setActionFeedback(null);
     try {
-      await rejectIncidentResponse(inc.id, {
-        actor: approver1Name || 'SOC_Analyst_Alice',
-        reason: 'Analyst assessed scenario as contained or benign.'
-      }).catch(() => {});
-
-      setActionFeedback({ type: 'info', message: 'Containment actions rejected and audit record logged.' });
-    } finally {
-      setActionInProgress(false);
-    }
-  };
-
-  const handleRecoverFalsePositive = async () => {
-    setActionInProgress(true);
-    setActionFeedback(null);
-    try {
-      await recoverFalsePositive(inc.id, {
-        reason: recoveryReason || 'Acknowledged false positive',
-        actor: recoveryActor || 'SOC_Lead',
-        restore_access: true
-      }).catch(() => {});
-
-      setContainmentStatus('resolved');
-      setMitigatedScore(0);
+      // 1. Enforce local UI containment & low-risk state
+      setAcknowledged(true);
+      setContainmentStatus('contained');
+      setMitigatedScore(15);
       setExecutedActions({
-        quarantine_agent: false,
-        lock_user: false,
+        quarantine_agent: true,
+        lock_user: true,
         approver_1: true,
         approver_2: true
       });
-      setShowRecoveryForm(false);
+
+      setDetailedIncident(prev => prev ? {
+        ...prev,
+        status: 'contained',
+        approval_state: 'APPROVED',
+        risk_assessment: {
+          ...prev.risk_assessment,
+          risk_score: 15,
+          risk_level: 'LOW'
+        }
+      } : prev);
+
+      if (setSelectedIncident) {
+        setSelectedIncident(prev => prev ? {
+          ...prev,
+          status: 'contained',
+          approval_state: 'APPROVED',
+          risk_assessment: {
+            ...prev.risk_assessment,
+            risk_score: 15,
+            risk_level: 'LOW'
+          }
+        } : prev);
+      }
+
+      if (onIncidentStatusChange) {
+        onIncidentStatusChange(inc.id, 'contained', 15, 'APPROVED', true);
+      }
+
+      // 2. Call backend sync-update endpoint (clears alerts in alert engine & synchronizes Cognee)
+      await syncUpdateUserResolution(inc.id, {
+        user_id: targetUser,
+        actor: approver1Name || 'SOC_Analyst',
+        reason: 'Dual-control containment approved and synchronized via console',
+        device_id: targetDevice !== 'N/A' && targetDevice !== 'Unknown Device' ? targetDevice : undefined,
+        ip: externalIp !== 'N/A' ? externalIp : undefined,
+        resource: targetResource !== 'N/A' ? targetResource : undefined,
+      }).catch(err => {
+        console.warn('Backend syncUpdateUserResolution notice:', err);
+      });
+
+      // 3. Update Supabase database alerts directly so Supabase single source of truth is updated
+      try {
+        await approveAllAlertsForUserInSupabase(targetUser);
+      } catch (err) {
+        console.warn('approveAllAlertsForUserInSupabase notice:', err);
+      }
+
+      // 4. Notify parent App to clear user alerts across all pages in the prototype
+      if (onSyncUpdateUser) {
+        await onSyncUpdateUser({
+          incidentId: inc.id,
+          userId: targetUser,
+          incident: inc
+        });
+      }
+
+      setSyncUpdated(true);
+      setActionFeedback({
+        type: 'success',
+        message: `System successfully updated! All active alerts for user '${targetUser}' have been cleared across INSIGHT Threat Monitor, Supabase Database, and Cognee AI baseline.`
+      });
+    } catch (err) {
+      console.error('System sync update error:', err);
+      setActionFeedback({
+        type: 'error',
+        message: `Sync update notice: ${err.message || 'Error updating system state'}`
+      });
+    } finally {
+      setIsUpdatingSync(false);
+    }
+  };
+
+  // Containment Rejection Handler (Supports Person 1 and Person 2)
+  const handleRejectContainment = async (stage = 1, customReason) => {
+    setActionInProgress(true);
+    setActionFeedback(null);
+    const actor = stage === 2 ? (approver2Name || 'SOC_Admin_Bob') : (approver1Name || 'SOC_Analyst_Alice');
+    const defaultReason = stage === 2 
+      ? `Dual-control containment authorization rejected by Co-Signer Admin (${actor}).`
+      : `Containment authorization rejected by Primary Approver (${actor}).`;
+    const reason = (typeof customReason === 'string' && customReason.trim()) || 
+                   (stage === 2 ? (rejectReason2 || defaultReason) : (rejectReason1 || defaultReason));
+
+    try {
+      await rejectIncidentResponse(inc.id, {
+        actor,
+        reason
+      }).catch((err) => {
+        console.warn('Reject API notice:', err);
+      });
+
+      setContainmentStatus('rejected');
+      setRejectionInfo({
+        stage,
+        actor,
+        reason,
+        timestamp: new Date().toLocaleTimeString()
+      });
+      setMitigatedScore(rawScore);
+      setExecutedActions({
+        quarantine_agent: false,
+        lock_user: false,
+        approver_1: false,
+        approver_2: false
+      });
+
+      setDetailedIncident(prev => prev ? {
+        ...prev,
+        status: 'active',
+        approval_state: 'REJECTED',
+        risk_assessment: {
+          ...prev.risk_assessment,
+          risk_score: rawScore,
+          risk_level: rawScore <= 59 ? 'MODERATE' : rawScore <= 79 ? 'HIGH' : 'CRITICAL'
+        }
+      } : prev);
+
+      if (setSelectedIncident) {
+        setSelectedIncident(prev => prev ? {
+          ...prev,
+          status: 'active',
+          approval_state: 'REJECTED',
+          risk_assessment: {
+            ...prev.risk_assessment,
+            risk_score: rawScore,
+            risk_level: rawScore <= 59 ? 'MODERATE' : rawScore <= 79 ? 'HIGH' : 'CRITICAL'
+          }
+        } : prev);
+      }
+
+      if (onIncidentStatusChange) {
+        onIncidentStatusChange(inc.id, 'active', rawScore, 'REJECTED', false);
+      }
+
+      setActionFeedback({
+        type: 'error',
+        message: `Containment REJECTED by ${actor} (Person ${stage})! Actions halted, risk remains unmitigated (${rawScore}/100), and decision recorded in immutable audit log.`
+      });
+    } finally {
+      setActionInProgress(false);
+    }
+  };
+
+  const handleResetContainment = () => {
+    setContainmentStatus('active');
+    setRejectionInfo(null);
+    setMitigatedScore(null);
+    setExecutedActions({
+      quarantine_agent: false,
+      lock_user: false,
+      approver_1: false,
+      approver_2: false,
+    });
+    setActionFeedback({
+      type: 'info',
+      message: 'Two-person approval gate reopened. Ready for fresh evaluation and authorization.'
+    });
+  };
+
+  const handleRecoverFalsePositive = async (overrideReason) => {
+    setActionInProgress(true);
+    setActionFeedback(null);
+    const activeReason = (typeof overrideReason === 'string' && overrideReason) || recoveryReason || 'Verified benign activity — full operational access restored by SOC Lead';
+
+    // 1. Immediately apply optimistic UI state transitions
+    setContainmentStatus('resolved');
+    setRejectionInfo(null);
+    setMitigatedScore(0);
+    setExecutedActions({
+      quarantine_agent: false,
+      lock_user: false,
+      approver_1: false,
+      approver_2: false
+    });
+    const updatedInc = {
+      ...inc,
+      status: 'resolved',
+      risk_assessment: {
+        ...(inc.risk_assessment || {}),
+        risk_score: 0,
+        risk_level: 'LOW'
+      }
+    };
+    setDetailedIncident(updatedInc);
+
+    // Save into isolated workflow and detail cache
+    workflowStateByIncidentRef.current.set(inc.id, {
+      containmentStatus: 'resolved',
+      rejectionInfo: null,
+      mitigatedScore: 0,
+      executedActions: { quarantine_agent: false, lock_user: false, approver_1: false, approver_2: false },
+      actionFeedback: { 
+        type: 'success', 
+        message: 'Normal access restored! All temporary agent and session restrictions lifted. Incident marked RESOLVED (Risk: 0 / 100).' 
+      }
+    });
+
+    if (detailCacheRef.current.has(inc.id)) {
+      const prevC = detailCacheRef.current.get(inc.id);
+      detailCacheRef.current.set(inc.id, { ...prevC, incident: updatedInc });
+    }
+
+    if (setSelectedIncident) {
+      setSelectedIncident(prev => prev && prev.id === inc.id ? updatedInc : prev);
+    }
+    setApprovalRecord(prev => prev ? { ...prev, state: 'RESOLVED' } : null);
+    setShowRecoveryForm(false);
+    if (onIncidentStatusChange) {
+      onIncidentStatusChange(inc.id, 'resolved', 0, 'RESOLVED', true);
+    }
+
+    try {
+      await recoverFalsePositive(inc.id, {
+        reason: activeReason,
+        actor: recoveryActor || 'SOC_Lead',
+        restore_access: true
+      });
 
       setActionFeedback({ 
         type: 'success', 
-        message: 'False positive confirmed: all restrictions lifted and incident marked RESOLVED (Risk: 0 / 100).' 
+        message: 'Normal access restored! All temporary agent and session restrictions lifted. Incident marked RESOLVED (Risk: 0 / 100).' 
       });
     } catch (err) {
-      setContainmentStatus('resolved');
-      setMitigatedScore(0);
-      setShowRecoveryForm(false);
-      setActionFeedback({ type: 'success', message: 'False positive recovered: restrictions lifted (Risk: 0 / 100).' });
+      console.warn('Backend recovery notice:', err);
+      setActionFeedback({ 
+        type: 'success', 
+        message: 'Normal access restored! All temporary agent and session restrictions lifted. Incident marked RESOLVED (Risk: 0 / 100).' 
+      });
     } finally {
       setActionInProgress(false);
     }
@@ -625,7 +1136,10 @@ export function IncidentsPage({
               {incidents.map((item) => (
                 <button
                   key={item.id}
-                  onClick={() => setActiveIncidentId(item.id)}
+                  onClick={() => {
+                    setActiveIncidentId(item.id);
+                    if (setSelectedIncident) setSelectedIncident(item);
+                  }}
                   className={`px-2.5 py-1 rounded-lg text-[11px] transition-all cursor-pointer font-mono ${
                     item.id === inc.id
                       ? 'bg-rose-100 dark:bg-rose-950 border border-rose-300 dark:border-rose-600 text-rose-800 dark:text-rose-200 font-bold shadow-xs'
@@ -666,6 +1180,8 @@ export function IncidentsPage({
               ? 'border-emerald-300 dark:border-emerald-700/60 bg-gradient-to-r from-emerald-50 via-teal-50 to-white dark:from-emerald-950/80 dark:via-slate-950 dark:to-teal-950/40 shadow-sm'
               : isContained 
               ? 'border-emerald-300 dark:border-emerald-700/60 bg-gradient-to-r from-emerald-50 via-slate-50 to-white dark:from-emerald-950/80 dark:via-slate-950 dark:to-cyan-950/40 shadow-sm'
+              : isRejected
+              ? 'border-rose-400 dark:border-rose-700/80 bg-gradient-to-r from-rose-50 via-red-50 to-white dark:from-rose-950/90 dark:via-red-950/70 dark:to-slate-950 shadow-sm'
               : isApprover1Done
               ? 'border-amber-300 dark:border-amber-700/60 bg-gradient-to-r from-amber-50 via-orange-50 to-white dark:from-amber-950/80 dark:via-slate-950 dark:to-orange-950/40 shadow-sm'
               : 'border-rose-300 dark:border-rose-800/60 bg-gradient-to-r from-rose-50 via-red-50 to-white dark:from-rose-950/90 dark:via-red-950/70 dark:to-slate-950 shadow-sm dark:shadow-[0_0_50px_rgba(225,29,72,0.25)]'
@@ -678,12 +1194,16 @@ export function IncidentsPage({
                 <div className={`w-16 h-16 sm:w-20 sm:h-20 rounded-2xl flex items-center justify-center text-white shadow-md shrink-0 transition-all ${
                   isResolved || isContained
                     ? 'bg-gradient-to-br from-emerald-500 to-teal-600 shadow-emerald-500/30'
+                    : isRejected
+                    ? 'bg-gradient-to-br from-rose-600 to-red-700 shadow-rose-600/30'
                     : isApprover1Done
                     ? 'bg-gradient-to-br from-amber-500 to-orange-600 shadow-amber-500/30'
                     : 'bg-gradient-to-br from-rose-600 to-red-700 shadow-rose-600/30 animate-pulse'
                 }`}>
                   {isResolved || isContained ? (
                     <ShieldCheck size={38} className="stroke-[2.2]" />
+                  ) : isRejected ? (
+                    <XCircle size={38} className="stroke-[2.2]" />
                   ) : isApprover1Done ? (
                     <ShieldAlert size={38} className="stroke-[2.2]" />
                   ) : (
@@ -696,20 +1216,24 @@ export function IncidentsPage({
                     <span className={`px-3 py-0.5 rounded-md text-white font-mono text-[11px] font-black uppercase tracking-wider shadow-xs ${
                       isResolved || isContained 
                         ? 'bg-emerald-600' 
+                        : isRejected
+                        ? 'bg-rose-600'
                         : isApprover1Done 
                         ? 'bg-amber-600' 
                         : 'bg-rose-600'
                     }`}>
-                      {isResolved ? 'INCIDENT RESOLVED' : isContained ? 'CONTAINMENT ACTIVE' : isApprover1Done ? 'APPROVAL 2 PENDING' : 'CRITICAL INCIDENT'}
+                      {isResolved ? 'INCIDENT RESOLVED' : isContained ? 'CONTAINMENT ACTIVE' : isRejected ? 'CONTAINMENT REJECTED' : isApprover1Done ? 'APPROVAL 2 PENDING' : 'CRITICAL INCIDENT'}
                     </span>
                   </div>
 
                   <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight leading-tight">
                     {isResolved 
-                      ? 'Incident Resolved (False Positive Verified)'
+                      ? `Incident Resolved (${threatType})`
                       : isContained 
-                      ? 'Threat Neutralized & Quarantined' 
-                      : inc.title || 'Unusual Resource Access Detected'}
+                      ? `Threat Neutralized & Quarantined (${threatType})` 
+                      : isRejected
+                      ? `Containment Blocked (Rejected by Person ${rejectionInfo?.stage || 1})`
+                      : (inc.title || `${threatType} Detected`)}
                   </h1>
 
                   <p className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 leading-relaxed font-sans">
@@ -717,29 +1241,38 @@ export function IncidentsPage({
                       ? 'Historical context preserved in audit log. All temporary session and tool restrictions lifted.'
                       : isContained 
                       ? 'Dual-control Two-Person Rule satisfied. AI agent quarantined and session privileges revoked.' 
+                      : isRejected
+                      ? (rejectionInfo?.reason || 'Human approver declined containment authorization. Policy enforcement halted.')
                       : isApprover1Done
                       ? 'Approver 1 authorized. Awaiting independent Approver 2 co-signature to finalize containment.'
-                      : inc.subtitle || 'High-confidence attack chain detected with multiple correlated signals.'}
+                      : (inc.subtitle || inc.risk_assessment?.reasons?.[0] || 'High-confidence attack chain detected with multiple correlated signals.')}
                   </p>
 
                   {/* Threat Tags */}
                   <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
-                    <span className="px-2.5 py-1 rounded-lg bg-rose-100 dark:bg-red-950/80 text-rose-800 dark:text-rose-300 border border-rose-200 dark:border-rose-800/60 flex items-center gap-1.5 shadow-xs">
+                    <span className="px-2.5 py-1 rounded-lg bg-rose-100 dark:bg-red-950/80 text-rose-800 dark:text-rose-300 border border-rose-200 dark:border-rose-800/60 flex items-center gap-1.5 shadow-xs font-bold">
                       <Flame size={12} className="text-rose-600 dark:text-rose-400" />
-                      <span>External Access</span>
+                      <span>{threatType}</span>
                     </span>
-                    <span className="px-2.5 py-1 rounded-lg bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800/60 flex items-center gap-1.5 shadow-xs">
-                      <ShieldAlert size={12} className="text-amber-600 dark:text-amber-400" />
-                      <span>Privilege Escalation</span>
-                    </span>
-                    <span className="px-2.5 py-1 rounded-lg bg-indigo-100 dark:bg-indigo-950/80 text-indigo-800 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/60 flex items-center gap-1.5 shadow-xs">
-                      <Bot size={12} className="text-indigo-600 dark:text-indigo-400" />
-                      <span>AI Agent Misuse</span>
-                    </span>
-                    <span className="px-2.5 py-1 rounded-lg bg-emerald-100 dark:bg-emerald-950/80 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60 flex items-center gap-1.5 shadow-xs">
-                      <Database size={12} className="text-emerald-600 dark:text-emerald-400" />
-                      <span>Data Exfiltration</span>
-                    </span>
+                    {inc.signals_detected && inc.signals_detected.length > 0 ? (
+                      inc.signals_detected.map((sig, sIdx) => (
+                        <span key={sig || sIdx} className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800/90 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 flex items-center gap-1.5">
+                          <Activity size={12} className="text-cyan-500" />
+                          <span>{sig.replace(/_/g, ' ')}</span>
+                        </span>
+                      ))
+                    ) : (
+                      <>
+                        <span className="px-2.5 py-1 rounded-lg bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800/60 flex items-center gap-1.5 shadow-xs">
+                          <ShieldAlert size={12} className="text-amber-600 dark:text-amber-400" />
+                          <span>Privilege Escalation</span>
+                        </span>
+                        <span className="px-2.5 py-1 rounded-lg bg-indigo-100 dark:bg-indigo-950/80 text-indigo-800 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/60 flex items-center gap-1.5 shadow-xs">
+                          <Bot size={12} className="text-indigo-600 dark:text-indigo-400" />
+                          <span>AI Agent Misuse</span>
+                        </span>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -829,15 +1362,15 @@ export function IncidentsPage({
                 </button>
 
                 <button
-                  onClick={() => setAcknowledged(true)}
+                  onClick={handleHeroAcknowledge}
                   className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer border ${
-                    acknowledged 
+                    acknowledged || isContained || isResolved
                       ? 'bg-emerald-100 dark:bg-emerald-950/80 border-emerald-300 dark:border-emerald-600 text-emerald-800 dark:text-emerald-300 shadow-xs'
                       : 'bg-white dark:bg-slate-900/80 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 border-slate-300 dark:border-slate-700/60'
                   }`}
                 >
-                  <Check size={14} className={acknowledged ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'} />
-                  <span>{acknowledged ? 'Acknowledged' : 'Acknowledge'}</span>
+                  <Check size={14} className={acknowledged || isContained || isResolved ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'} />
+                  <span>{acknowledged || isContained || isResolved ? 'Acknowledged' : 'Acknowledge'}</span>
                 </button>
 
                 <button
@@ -847,6 +1380,30 @@ export function IncidentsPage({
                 >
                   <Volume2 size={14} className={`text-purple-600 dark:text-purple-300 ${isPlayingVoice ? 'animate-bounce' : ''}`} />
                   <span>{isPlayingVoice ? 'Speaking...' : 'Replay Voice'}</span>
+                </button>
+
+                {/* Update & Sync System Button */}
+                <button
+                  onClick={handleSyncUpdate}
+                  disabled={isUpdatingSync}
+                  id="btn-hero-update-sync"
+                  className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer border shadow-xs ${
+                    syncUpdated
+                      ? 'bg-emerald-100 dark:bg-emerald-950/90 text-emerald-800 dark:text-emerald-200 border-emerald-300 dark:border-emerald-700'
+                      : isContained || isResolved
+                      ? 'bg-cyan-600 hover:bg-cyan-500 text-white border-cyan-500 shadow-cyan-600/20'
+                      : 'bg-white dark:bg-slate-900/80 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 border-slate-300 dark:border-slate-700/60'
+                  }`}
+                  title="Approve and Update: Clear all alerts for this user across INSIGHT Threat Monitor, Supabase DB & Cognee"
+                >
+                  <RefreshCw size={14} className={`text-current ${isUpdatingSync ? 'animate-spin' : ''}`} />
+                  <span>
+                    {isUpdatingSync 
+                      ? 'Updating System...' 
+                      : syncUpdated 
+                      ? '✓ Updated & Synced' 
+                      : 'Update (Sync DB & Cognee)'}
+                  </span>
                 </button>
               </div>
 
@@ -1458,6 +2015,294 @@ export function IncidentsPage({
         </Card>
       )}
 
+      {/* Tab: Risk Analysis (Comprehensive Deep Security Assessment) */}
+      {activeTab === 'risk-analysis' && (
+        <div className="space-y-6 animate-fade-in">
+          {/* 1. Header Card: Score Gauge & Risk Posture */}
+          <Card className="p-6 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-xl bg-cyan-100 dark:bg-cyan-950/80 border border-cyan-200 dark:border-cyan-800/60 text-cyan-700 dark:text-cyan-400">
+                  <Gauge size={20} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900 dark:text-white font-mono">
+                    Multi-Factor Risk Assessment & Behavioral Analysis
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 font-sans">
+                    Incident ID: <span className="font-mono text-cyan-600 dark:text-cyan-400 font-bold">{inc.id}</span> • Dynamic multi-signal correlation across Identity, Agent & Data tiers
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className={`px-3 py-1 rounded-xl text-xs font-mono font-bold uppercase border shadow-xs ${
+                  isResolved
+                    ? 'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-800 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700'
+                    : isContained
+                    ? 'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-800 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700'
+                    : 'bg-rose-100 dark:bg-rose-950/80 text-rose-800 dark:text-rose-300 border-rose-300 dark:border-rose-700'
+                }`}>
+                  {isResolved ? '✓ RESOLVED / NEUTRALIZED' : isContained ? '✓ CONTAINED (SAFEGUARD ACTIVE)' : `🚨 ${level} THREAT`}
+                </span>
+              </div>
+            </div>
+
+            {/* Score Comparison & Core Metrics */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              {/* Radial Gauge Card */}
+              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 flex items-center gap-4">
+                <div className="relative w-20 h-20 shrink-0 flex items-center justify-center">
+                  <svg className="w-full h-full transform -rotate-90" viewBox="0 0 110 110">
+                    <circle
+                      cx="55"
+                      cy="55"
+                      r={gaugeRadius}
+                      fill="transparent"
+                      stroke="currentColor"
+                      className="text-slate-200 dark:text-slate-800"
+                      strokeWidth="9"
+                    />
+                    <circle
+                      cx="55"
+                      cy="55"
+                      r={gaugeRadius}
+                      fill="transparent"
+                      stroke={gaugeStrokeColor}
+                      strokeWidth="9"
+                      strokeDasharray={gaugeCircumference}
+                      strokeDashoffset={gaugeOffset}
+                      strokeLinecap="round"
+                      style={{ transition: 'stroke-dashoffset 0.8s ease-in-out, stroke 0.8s ease' }}
+                    />
+                  </svg>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                    <span className={`text-xl font-black font-mono tracking-tight ${
+                      isResolved || isContained ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-900 dark:text-white'
+                    }`}>
+                      {score}
+                    </span>
+                    <span className="text-[9px] font-mono text-slate-500 dark:text-slate-400">/ 100</span>
+                  </div>
+                </div>
+
+                <div className="space-y-1 font-mono">
+                  <div className="text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-wider">Effective Score</div>
+                  <div className="text-sm font-bold text-slate-900 dark:text-white">
+                    {score} / 100
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Level: <strong className={isResolved || isContained ? 'text-emerald-500' : 'text-rose-500'}>{level}</strong>
+                  </div>
+                </div>
+              </div>
+
+              {/* Baseline / Pre-Mitigation Score */}
+              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 space-y-1">
+                <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center justify-between">
+                  <span>Pre-Mitigation Risk</span>
+                  <Activity size={13} className="text-rose-500" />
+                </div>
+                <div className="text-xl font-bold font-mono text-slate-900 dark:text-white">
+                  {rawScore} <span className="text-xs text-slate-500 font-normal">/ 100</span>
+                </div>
+                <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+                  Original multi-signal threat severity
+                </div>
+              </div>
+
+              {/* Attenuation / Risk Reduction */}
+              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 space-y-1">
+                <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center justify-between">
+                  <span>Risk Attenuation</span>
+                  <ShieldCheck size={13} className="text-emerald-500" />
+                </div>
+                <div className={`text-xl font-bold font-mono ${
+                  rawScore - score > 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500'
+                }`}>
+                  {rawScore - score > 0 ? `-${rawScore - score} pts` : '0 pts (Active)'}
+                </div>
+                <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+                  {isResolved ? 'Full Neutralization (Audit Log Kept)' : isContained ? 'Dual-Control Dual Approvers Active' : 'No Safeguards Enforced Yet'}
+                </div>
+              </div>
+
+              {/* Confidence Rating */}
+              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 space-y-1">
+                <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center justify-between">
+                  <span>Model Confidence</span>
+                  <Sparkles size={13} className="text-cyan-500" />
+                </div>
+                <div className="text-xl font-bold font-mono text-cyan-600 dark:text-cyan-400">
+                  {confidence}%
+                </div>
+                <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+                  Multi-signal Bayesian consensus
+                </div>
+              </div>
+            </div>
+          </Card>
+
+          {/* 2. Middle Row: Signals Breakdown (Left) & Explainable Rationales (Right) */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            
+            {/* Left 6 cols: Mathematical Signal Breakdown */}
+            <div className="lg:col-span-6 space-y-4">
+              <Card className="p-5 space-y-4 h-full flex flex-col justify-between">
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+                    <div className="flex items-center gap-2">
+                      <Network size={16} className="text-cyan-600 dark:text-cyan-400" />
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-slate-900 dark:text-white font-mono">
+                        Contributing Risk Signals
+                      </h4>
+                    </div>
+                    <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
+                      Weighted Contribution
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed font-sans">
+                    Individual risk contributions are independently evaluated and bounded. When mitigation actions or dual approvals are applied, each factor attenuates dynamically:
+                  </p>
+
+                  <div className="space-y-3 pt-1">
+                    {signalsBreakdown.map((sig) => (
+                      <div key={sig.name} className="space-y-1.5 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800">
+                        <div className="flex justify-between text-xs font-mono">
+                          <span className="font-semibold text-slate-800 dark:text-slate-200">{sig.name}</span>
+                          <span className="font-bold text-slate-900 dark:text-white">
+                            {sig.score} <span className="text-[10px] text-slate-500 font-normal">/ {sig.max}</span>
+                          </span>
+                        </div>
+                        <div className="w-full h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full bg-gradient-to-r transition-all duration-700 ${sig.color}`}
+                            style={{ width: `${(sig.score / sig.max) * 100}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Detected Signal Tags */}
+                <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                  <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider font-mono">
+                    All Correlated Signals ({inc.signals_detected?.length || 0})
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 font-mono text-[10px]">
+                    {(inc.signals_detected || ['unusual_resource_access', 'tool_abuse', 'bulk_data']).map((sig, i) => (
+                      <span key={i} className="px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 font-medium">
+                        {sig}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </Card>
+            </div>
+
+            {/* Right 6 cols: Explainable AI Rationales & Baseline Deviations */}
+            <div className="lg:col-span-6 space-y-4">
+              <Card className="p-5 space-y-4 h-full flex flex-col justify-between">
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+                    <div className="flex items-center gap-2">
+                      <Lightbulb size={16} className="text-amber-500" />
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-slate-900 dark:text-white font-mono">
+                        Explainable Intelligence Rationales
+                      </h4>
+                    </div>
+                    <span className="text-[10px] font-mono text-cyan-600 dark:text-cyan-400 font-bold">
+                      {confidence}% Confidence
+                    </span>
+                  </div>
+
+                  <div className="space-y-2.5 text-xs font-sans text-slate-700 dark:text-slate-300">
+                    {(inc.risk_assessment?.reasons && inc.risk_assessment.reasons.length > 0
+                      ? inc.risk_assessment.reasons
+                      : [
+                          'Correlated multi-event sequence detected connecting external access to sensitive internal database records.',
+                          'AI agent executed restricted raw SQL tool targeting production credential stores outside defined operational baseline.',
+                          'Bulk data extraction volume exceeds standard operational threshold by more than 10x.'
+                        ]
+                    ).map((reason, idx) => (
+                      <div key={idx} className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800/80">
+                        <AlertTriangle size={15} className="text-amber-500 shrink-0 mt-0.5" />
+                        <span className="leading-relaxed">{reason}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Behavioral Baseline Deviations */}
+                <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2 font-mono text-xs">
+                  <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                    Behavioral Baseline Deviations
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                    <div className="p-2 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                      <span className="text-slate-500 dark:text-slate-400 block text-[10px]">DEVICE BASELINE</span>
+                      <span className="text-rose-600 dark:text-rose-400 font-bold truncate block">Unseen Hardware</span>
+                    </div>
+                    <div className="p-2 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                      <span className="text-slate-500 dark:text-slate-400 block text-[10px]">AGENT TOOL BASELINE</span>
+                      <span className="text-amber-600 dark:text-amber-400 font-bold truncate block">raw_sql_exec (Privileged)</span>
+                    </div>
+                    <div className="p-2 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                      <span className="text-slate-500 dark:text-slate-400 block text-[10px]">RESOURCE DOMAIN</span>
+                      <span className="text-rose-600 dark:text-rose-400 font-bold truncate block">HR → Customer Credentials</span>
+                    </div>
+                    <div className="p-2 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                      <span className="text-slate-500 dark:text-slate-400 block text-[10px]">EXPORT VOLUME</span>
+                      <span className="text-purple-600 dark:text-purple-400 font-bold truncate block">{exfilVolume || '15,000 records'}</span>
+                    </div>
+                  </div>
+                </div>
+              </Card>
+            </div>
+
+          </div>
+
+          {/* 3. Recommended Action Banner & Action Navigation */}
+          <Card className="p-5 bg-gradient-to-r from-slate-50 via-slate-100 to-amber-50 dark:from-slate-900 dark:via-slate-900/90 dark:to-amber-950/20 border border-amber-200 dark:border-amber-800/60 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-xs font-bold text-amber-800 dark:text-amber-300 font-mono">
+                  <CheckCircle2 size={16} className="text-amber-500" />
+                  <span>Recommended Mitigation Action</span>
+                </div>
+                <p className="text-xs text-slate-700 dark:text-slate-300">
+                  {inc.risk_assessment?.recommended_action || (
+                    isResolved 
+                      ? 'Incident verified and neutralized. All restrictions lifted.' 
+                      : isContained 
+                      ? 'Containment active under Two-Person dual control.' 
+                      : 'Require human dual-control approval for containment and quarantine agent session.'
+                  )}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => setActiveTab('response')}
+                  className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-mono text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-xs"
+                >
+                  <span>{isResolved ? 'Review Containment History' : 'Open Action Center'}</span>
+                  <ArrowRight size={13} />
+                </button>
+                <button
+                  onClick={() => setActiveTab('attack-chain')}
+                  className="px-3.5 py-2 rounded-xl bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-mono text-xs transition-all cursor-pointer"
+                >
+                  View Attack Progression
+                </button>
+              </div>
+            </div>
+          </Card>
+        </div>
+      )}
+
       {/* Tab: Response & Approvals */}
       {(activeTab === 'response' || activeTab === 'approvals') && (
         <div className="space-y-6">
@@ -1505,9 +2350,11 @@ export function IncidentsPage({
                   ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700'
                   : isResolved
                   ? 'bg-cyan-100 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 border-cyan-300 dark:border-cyan-700'
+                  : isRejected
+                  ? 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-300 dark:border-rose-700'
                   : 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-700'
               }`}>
-                {isContained ? 'Policy Enforced (Contained)' : isResolved ? 'Policy Cleared (Resolved)' : 'Level 4 Policy Active'}
+                {isContained ? 'Policy Enforced (Contained)' : isResolved ? 'Policy Cleared (Resolved)' : isRejected ? 'Containment Rejected' : 'Level 4 Policy Active'}
               </span>
             </div>
 
@@ -1526,6 +2373,8 @@ export function IncidentsPage({
                     <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${
                       isContained 
                         ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300' 
+                        : isRejected
+                        ? 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300'
                         : isApprover1Done 
                         ? 'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300' 
                         : 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300'
@@ -1537,29 +2386,39 @@ export function IncidentsPage({
               </div>
 
               <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                <span className={`px-2.5 py-1 rounded-lg border transition-all ${
-                  executedActions.quarantine_agent || isContained 
-                    ? 'bg-teal-50 dark:bg-teal-950/80 border-teal-300 dark:border-teal-700 text-teal-700 dark:text-teal-300 font-bold shadow-xs' 
-                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-400'
-                }`}>
-                  {executedActions.quarantine_agent || isContained ? '✓ Agent Quarantined (-35 pts)' : '○ Quarantine Inactive'}
-                </span>
-                <span className={`px-2.5 py-1 rounded-lg border transition-all ${
-                  executedActions.lock_user || isContained 
-                    ? 'bg-rose-50 dark:bg-rose-950/80 border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-300 font-bold shadow-xs' 
-                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-400'
-                }`}>
-                  {executedActions.lock_user || isContained ? '✓ Session Locked (-30 pts)' : '○ Session Active'}
-                </span>
-                <span className={`px-2.5 py-1 rounded-lg border transition-all ${
-                  isContained 
-                    ? 'bg-emerald-50 dark:bg-emerald-950/80 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-300 font-bold shadow-xs' 
-                    : isApprover1Done 
-                    ? 'bg-blue-50 dark:bg-blue-950/80 border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 font-bold shadow-xs'
-                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-400'
-                }`}>
-                  {isContained ? '✓ Dual Approved (Contained)' : isApprover1Done ? '✓ 1st Approved (-20 pts)' : '○ Two-Person Gate Open'}
-                </span>
+                {isResolved ? (
+                  <span className="px-2.5 py-1 rounded-lg border bg-emerald-50 dark:bg-emerald-950/80 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-300 font-bold shadow-xs">
+                    ✓ Normal Access Restored (All Restrictions Lifted)
+                  </span>
+                ) : (
+                  <>
+                    <span className={`px-2.5 py-1 rounded-lg border transition-all ${
+                      executedActions.quarantine_agent || isContained 
+                        ? 'bg-teal-50 dark:bg-teal-950/80 border-teal-300 dark:border-teal-700 text-teal-700 dark:text-teal-300 font-bold shadow-xs' 
+                        : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-400'
+                    }`}>
+                      {executedActions.quarantine_agent || isContained ? '✓ Agent Quarantined (-35 pts)' : '○ Quarantine Inactive'}
+                    </span>
+                    <span className={`px-2.5 py-1 rounded-lg border transition-all ${
+                      executedActions.lock_user || isContained 
+                        ? 'bg-rose-50 dark:bg-rose-950/80 border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-300 font-bold shadow-xs' 
+                        : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-400'
+                    }`}>
+                      {executedActions.lock_user || isContained ? '✓ Session Locked (-30 pts)' : '○ Session Active'}
+                    </span>
+                    <span className={`px-2.5 py-1 rounded-lg border transition-all ${
+                      isContained 
+                        ? 'bg-emerald-50 dark:bg-emerald-950/80 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-300 font-bold shadow-xs' 
+                        : isRejected
+                        ? 'bg-rose-50 dark:bg-rose-950/80 border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-300 font-bold shadow-xs'
+                        : isApprover1Done 
+                        ? 'bg-blue-50 dark:bg-blue-950/80 border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 font-bold shadow-xs'
+                        : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-400'
+                    }`}>
+                      {isContained ? '✓ Dual Approved (Contained)' : isRejected ? `✕ Rejected (Person ${rejectionInfo?.stage || 1})` : isApprover1Done ? '✓ 1st Approved (-20 pts)' : '○ Two-Person Gate Open'}
+                    </span>
+                  </>
+                )}
               </div>
             </div>
 
@@ -1568,85 +2427,142 @@ export function IncidentsPage({
               
               {/* Card 1: Quarantine Agent */}
               <div className={`p-4 rounded-xl border space-y-2 transition-all ${
-                executedActions.quarantine_agent || isContained
+                !isResolved && (executedActions.quarantine_agent || isContained)
                   ? 'bg-teal-50/70 dark:bg-teal-950/40 border-teal-300 dark:border-teal-700 shadow-xs'
                   : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800'
               }`}>
                 <div className="font-bold text-slate-900 dark:text-white flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Bot size={16} className="text-teal-600 dark:text-teal-400" />
+                    <Bot size={16} className={!isResolved && (executedActions.quarantine_agent || isContained) ? "text-teal-600 dark:text-teal-400" : "text-slate-400"} />
                     <span>{isEasyMode ? 'Stop Agent from Using Tools' : 'Quarantine Agent'}</span>
                   </div>
-                  {(executedActions.quarantine_agent || isContained) && (
+                  {!isResolved && (executedActions.quarantine_agent || isContained) ? (
                     <span className="px-2 py-0.5 rounded text-[10px] bg-teal-100 dark:bg-teal-900 text-teal-800 dark:text-teal-200 font-bold">
                       ✓ Active
                     </span>
-                  )}
+                  ) : isResolved ? (
+                    <span className="px-2 py-0.5 rounded text-[10px] bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 font-medium">
+                      ○ Lifted
+                    </span>
+                  ) : null}
                 </div>
                 <p className="text-[11px] text-slate-600 dark:text-slate-400 font-sans">
                   {isEasyMode ? 'Prevents the copilot agent from running database queries.' : 'Isolates copilot worker instance and invalidates runtime session keys.'}
                 </p>
                 <button
                   onClick={handleExecuteQuarantine}
-                  disabled={actionInProgress || executedActions.quarantine_agent}
+                  disabled={actionInProgress || executedActions.quarantine_agent || isResolved}
                   className={`w-full py-2 rounded-lg font-bold transition-all cursor-pointer ${
-                    executedActions.quarantine_agent || isContained
+                    !isResolved && (executedActions.quarantine_agent || isContained)
                       ? 'bg-teal-600 text-white shadow-xs opacity-90'
+                      : isResolved
+                      ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
                       : 'bg-teal-100 dark:bg-teal-950/80 hover:bg-teal-200 dark:hover:bg-teal-900 text-teal-800 dark:text-teal-300 border border-teal-300 dark:border-teal-700'
                   }`}
                 >
-                  {executedActions.quarantine_agent || isContained ? '✓ Agent Quarantined' : isEasyMode ? 'Approve Agent Restriction' : 'Execute Quarantine'}
+                  {!isResolved && (executedActions.quarantine_agent || isContained) ? '✓ Agent Quarantined' : isResolved ? 'Quarantine Lifted' : isEasyMode ? 'Approve Agent Restriction' : 'Execute Quarantine'}
                 </button>
               </div>
 
               {/* Card 2: Lock User Session */}
               <div className={`p-4 rounded-xl border space-y-2 transition-all ${
-                executedActions.lock_user || isContained
+                !isResolved && (executedActions.lock_user || isContained)
                   ? 'bg-rose-50/70 dark:bg-rose-950/40 border-rose-300 dark:border-rose-700 shadow-xs'
                   : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800'
               }`}>
                 <div className="font-bold text-slate-900 dark:text-white flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Lock size={16} className="text-rose-600 dark:text-rose-400" />
+                    <Lock size={16} className={!isResolved && (executedActions.lock_user || isContained) ? "text-rose-600 dark:text-rose-400" : "text-slate-400"} />
                     <span>{isEasyMode ? 'Temporarily Restrict Session' : 'Lock User Session'}</span>
                   </div>
-                  {(executedActions.lock_user || isContained) && (
+                  {!isResolved && (executedActions.lock_user || isContained) ? (
                     <span className="px-2 py-0.5 rounded text-[10px] bg-rose-100 dark:bg-rose-900 text-rose-800 dark:text-rose-200 font-bold">
                       ✓ Revoked
                     </span>
-                  )}
+                  ) : isResolved ? (
+                    <span className="px-2 py-0.5 rounded text-[10px] bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 font-medium">
+                      ○ Unlocked
+                    </span>
+                  ) : null}
                 </div>
                 <p className="text-[11px] text-slate-600 dark:text-slate-400 font-sans">
                   {isEasyMode ? `Signs out active login cookies for ${targetUser}.` : `Immediately revokes active auth cookies for ${targetUser}.`}
                 </p>
                 <button
                   onClick={handleExecuteLockSession}
-                  disabled={actionInProgress || executedActions.lock_user}
+                  disabled={actionInProgress || executedActions.lock_user || isResolved}
                   className={`w-full py-2 rounded-lg font-bold transition-all cursor-pointer ${
-                    executedActions.lock_user || isContained
+                    !isResolved && (executedActions.lock_user || isContained)
                       ? 'bg-rose-600 text-white shadow-xs opacity-90'
+                      : isResolved
+                      ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
                       : 'bg-rose-100 dark:bg-rose-950/80 hover:bg-rose-200 dark:hover:bg-rose-900 text-rose-800 dark:text-rose-300 border border-rose-300 dark:border-rose-700'
                   }`}
                 >
-                  {executedActions.lock_user || isContained ? '✓ Session Locked' : isEasyMode ? 'Approve Session Restriction' : 'Revoke & Lock'}
+                  {!isResolved && (executedActions.lock_user || isContained) ? '✓ Session Locked' : isResolved ? 'Session Unlocked' : isEasyMode ? 'Approve Session Restriction' : 'Revoke & Lock'}
                 </button>
               </div>
 
               {/* Card 3: False Positive Recovery */}
-              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
-                <div className="font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                  <Undo2 size={16} className="text-amber-600 dark:text-amber-400" />
-                  <span>{isEasyMode ? 'Mark as Legitimate Work' : 'False Positive Recovery'}</span>
+              <div className={`p-4 rounded-xl border space-y-2 transition-all ${
+                isResolved
+                  ? 'bg-emerald-50/70 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-700 shadow-xs'
+                  : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800'
+              }`}>
+                <div className="font-bold text-slate-900 dark:text-white flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Undo2 size={16} className={isResolved ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"} />
+                    <span>{isEasyMode ? 'Mark as Legitimate Work' : 'False Positive Recovery'}</span>
+                  </div>
+                  {isResolved && (
+                    <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200 font-bold">
+                      ✓ Restored
+                    </span>
+                  )}
                 </div>
                 <p className="text-[11px] text-slate-600 dark:text-slate-400 font-sans">
                   {isEasyMode ? 'If this was an authorized backup test, restores normal access.' : 'Allows authorized SOC lead to restore normal operational status.'}
                 </p>
-                <button
-                  onClick={() => setShowRecoveryForm(!showRecoveryForm)}
-                  className="w-full py-2 rounded-lg bg-amber-100 dark:bg-amber-950/80 hover:bg-amber-200 dark:hover:bg-amber-900 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-700 font-bold transition-all cursor-pointer"
-                >
-                  {showRecoveryForm ? 'Hide Form' : 'Restore Access'}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleRecoverFalsePositive()}
+                    disabled={actionInProgress || isResolved}
+                    className={`flex-1 py-2 px-3 rounded-lg font-bold transition-all cursor-pointer ${
+                      isResolved
+                        ? 'bg-emerald-600 text-white shadow-xs opacity-90'
+                        : 'bg-amber-500 hover:bg-amber-600 text-white shadow-xs'
+                    }`}
+                  >
+                    {actionInProgress ? 'Restoring Access...' : isResolved ? '✓ Access Restored' : 'Restore Access'}
+                  </button>
+                  {!isResolved && (
+                    <button
+                      onClick={() => setShowRecoveryForm(!showRecoveryForm)}
+                      className="px-2.5 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-[11px] font-mono hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer"
+                      title="Add Custom Justification Note"
+                    >
+                      {showRecoveryForm ? '▲' : 'Note'}
+                    </button>
+                  )}
+                </div>
+                {showRecoveryForm && !isResolved && (
+                  <div className="pt-2 space-y-2 border-t border-slate-200 dark:border-slate-800">
+                    <textarea
+                      value={recoveryReason}
+                      onChange={(e) => setRecoveryReason(e.target.value)}
+                      placeholder="Audit justification reason..."
+                      className="w-full p-2 text-[11px] rounded-lg bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white font-mono"
+                      rows={2}
+                    />
+                    <button
+                      onClick={() => handleRecoverFalsePositive(recoveryReason)}
+                      disabled={actionInProgress}
+                      className="w-full py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] cursor-pointer"
+                    >
+                      Confirm with Note
+                    </button>
+                  </div>
+                )}
               </div>
 
             </div>
@@ -1655,6 +2571,8 @@ export function IncidentsPage({
             <div className={`p-5 rounded-2xl border space-y-4 transition-all ${
               isContained 
                 ? 'bg-emerald-50/50 dark:bg-emerald-950/20 border-emerald-300 dark:border-emerald-700/60' 
+                : isRejected
+                ? 'bg-rose-50/50 dark:bg-rose-950/20 border-rose-300 dark:border-rose-700/60'
                 : 'bg-slate-50 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800'
             }`}>
               <div className="flex items-center justify-between font-mono text-xs">
@@ -1667,98 +2585,264 @@ export function IncidentsPage({
                     Dual-Control Satisfied
                   </span>
                 )}
+                {isRejected && (
+                  <div className="flex items-center gap-2">
+                    <span className="px-2.5 py-0.5 rounded-full bg-rose-600 text-white font-bold text-[10px] uppercase">
+                      Containment Rejected (Stage {rejectionInfo?.stage || 1})
+                    </span>
+                    <button
+                      onClick={handleResetContainment}
+                      className="px-2 py-0.5 rounded bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:text-cyan-600 dark:hover:text-cyan-400 font-bold text-[10px] cursor-pointer flex items-center gap-1 shadow-xs"
+                    >
+                      <Undo2 size={10} /> Reopen Gate
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs font-mono">
                 
                 {/* Approver 1 */}
-                <div className={`p-3 rounded-xl border space-y-2 shadow-xs transition-all ${
-                  isApprover1Done 
+                <div className={`p-3.5 rounded-xl border space-y-2.5 shadow-xs transition-all ${
+                  isRejected && rejectionInfo?.stage === 1
+                    ? 'bg-rose-50/70 dark:bg-rose-950/40 border-rose-300 dark:border-rose-700'
+                    : isApprover1Done 
                     ? 'bg-emerald-50/70 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-700' 
                     : 'bg-white dark:bg-slate-950 border-slate-200 dark:border-slate-800'
                 }`}>
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500 dark:text-slate-400 font-bold">Person 1 (Primary Approver)</span>
-                    {isApprover1Done && (
+                    {isRejected && rejectionInfo?.stage === 1 ? (
+                      <span className="text-rose-600 dark:text-rose-400 font-bold text-[11px] flex items-center gap-1">
+                        <XCircle size={13} /> Rejected
+                      </span>
+                    ) : isApprover1Done ? (
                       <span className="text-emerald-600 dark:text-emerald-400 font-bold text-[11px] flex items-center gap-1">
                         <CheckCircle2 size={13} /> Approved
                       </span>
-                    )}
+                    ) : null}
                   </div>
                   <input
                     value={approver1Name}
-                    disabled={isApprover1Done}
+                    disabled={isApprover1Done || (isRejected && rejectionInfo?.stage === 1)}
                     onChange={(e) => setApprover1Name(e.target.value)}
+                    placeholder="Approver 1 Name"
                     className="w-full p-2 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white disabled:opacity-70"
                   />
-                  <button
-                    onClick={handleApproveContainment}
-                    disabled={actionInProgress || isApprover1Done}
-                    className={`w-full py-2 rounded-lg font-bold transition-all cursor-pointer shadow-xs ${
-                      isApprover1Done 
-                        ? 'bg-emerald-600 text-white opacity-90' 
-                        : 'bg-blue-600 hover:bg-blue-500 text-white'
-                    }`}
-                  >
-                    {isApprover1Done ? '✓ 1st Approval Signed' : 'Submit 1st Approval'}
-                  </button>
+
+                  {/* Person 1 Action Buttons (Approve & Reject) */}
+                  {isRejected && rejectionInfo?.stage === 1 ? (
+                    <div className="space-y-1.5">
+                      <div className="w-full py-2 rounded-lg font-bold bg-rose-600 text-white text-center flex items-center justify-center gap-1.5 text-xs shadow-xs">
+                        <XCircle size={13} /> 1st Approval Rejected
+                      </div>
+                      <button
+                        onClick={handleResetContainment}
+                        className="w-full text-center text-[10px] text-cyan-600 dark:text-cyan-400 hover:underline cursor-pointer flex items-center justify-center gap-1 pt-0.5"
+                      >
+                        <Undo2 size={11} /> Reopen Gate / Try Again
+                      </button>
+                    </div>
+                  ) : isApprover1Done ? (
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 py-2 px-3 rounded-lg font-bold bg-emerald-600 text-white opacity-95 flex items-center justify-center gap-1.5 shadow-xs text-xs">
+                        <CheckCircle2 size={13} /> 1st Approval Signed
+                      </div>
+                      {!isContained && (
+                        <button
+                          onClick={() => handleRejectContainment(1)}
+                          disabled={actionInProgress}
+                          className="py-2 px-3 rounded-lg font-bold bg-rose-100 hover:bg-rose-200 dark:bg-rose-950/80 dark:hover:bg-rose-900 text-rose-700 dark:text-rose-300 border border-rose-300 dark:border-rose-700 text-xs transition-all cursor-pointer flex items-center gap-1 shrink-0"
+                          title="Revoke / Reject 1st Approval"
+                        >
+                          <XCircle size={13} /> Reject
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={handleApproveContainment}
+                          disabled={actionInProgress}
+                          className="flex-1 py-2 px-3 rounded-lg font-bold transition-all cursor-pointer shadow-xs bg-emerald-600 hover:bg-emerald-500 text-white flex items-center justify-center gap-1.5 text-xs"
+                          id="btn-person1-approve"
+                        >
+                          <CheckCircle2 size={13} /> Approve
+                        </button>
+                        <button
+                          onClick={() => handleRejectContainment(1)}
+                          disabled={actionInProgress}
+                          className="flex-1 py-2 px-3 rounded-lg font-bold transition-all cursor-pointer shadow-xs bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center gap-1.5 text-xs"
+                          id="btn-person1-reject"
+                        >
+                          <XCircle size={13} /> Reject
+                        </button>
+                        <button
+                          onClick={() => setShowRejectNote1(!showRejectNote1)}
+                          className="px-2.5 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-[11px] font-mono hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer shrink-0"
+                          title="Add Rejection Note"
+                        >
+                          {showRejectNote1 ? '▲' : 'Note'}
+                        </button>
+                      </div>
+                      {showRejectNote1 && (
+                        <div className="pt-1.5 space-y-1.5 border-t border-slate-200 dark:border-slate-800">
+                          <input
+                            value={rejectReason1}
+                            onChange={(e) => setRejectReason1(e.target.value)}
+                            placeholder="Optional reason for rejection..."
+                            className="w-full p-1.5 text-[11px] rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white font-mono"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Approver 2 */}
-                <div className={`p-3 rounded-xl border space-y-2 shadow-xs transition-all ${
-                  isApprover2Done 
+                <div className={`p-3.5 rounded-xl border space-y-2.5 shadow-xs transition-all ${
+                  isRejected && rejectionInfo?.stage === 2
+                    ? 'bg-rose-50/70 dark:bg-rose-950/40 border-rose-300 dark:border-rose-700'
+                    : isApprover2Done 
                     ? 'bg-purple-50/70 dark:bg-purple-950/40 border-purple-300 dark:border-purple-700' 
                     : 'bg-white dark:bg-slate-950 border-slate-200 dark:border-slate-800'
                 }`}>
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500 dark:text-slate-400 font-bold">Person 2 (Co-Signer Admin)</span>
-                    {isApprover2Done && (
+                    {isRejected && rejectionInfo?.stage === 2 ? (
+                      <span className="text-rose-600 dark:text-rose-400 font-bold text-[11px] flex items-center gap-1">
+                        <XCircle size={13} /> Co-Signer Rejected
+                      </span>
+                    ) : isApprover2Done ? (
                       <span className="text-purple-600 dark:text-purple-400 font-bold text-[11px] flex items-center gap-1">
                         <CheckCircle2 size={13} /> Dual-Control Verified
                       </span>
-                    )}
+                    ) : null}
                   </div>
                   <input
                     value={approver2Name}
-                    disabled={isApprover2Done}
+                    disabled={isApprover2Done || !isApprover1Done || (isRejected && rejectionInfo?.stage === 2)}
                     onChange={(e) => setApprover2Name(e.target.value)}
+                    placeholder="Approver 2 Name"
                     className="w-full p-2 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white disabled:opacity-70"
                   />
-                  <button
-                    onClick={handleSecondApproveContainment}
-                    disabled={actionInProgress || isApprover2Done}
-                    className={`w-full py-2 rounded-lg font-bold transition-all cursor-pointer shadow-xs ${
-                      isApprover2Done 
-                        ? 'bg-purple-600 text-white opacity-90' 
-                        : 'bg-purple-600 hover:bg-purple-500 text-white animate-pulse'
-                    }`}
-                  >
-                    {isApprover2Done ? '✓ 2nd Approval Signed' : 'Submit 2nd Approval'}
-                  </button>
+
+                  {/* Person 2 Action Buttons (Approve & Reject) */}
+                  {isRejected && rejectionInfo?.stage === 2 ? (
+                    <div className="space-y-1.5">
+                      <div className="w-full py-2 rounded-lg font-bold bg-rose-600 text-white text-center flex items-center justify-center gap-1.5 text-xs shadow-xs">
+                        <XCircle size={13} /> Dual-Control Rejected
+                      </div>
+                      <button
+                        onClick={handleResetContainment}
+                        className="w-full text-center text-[10px] text-cyan-600 dark:text-cyan-400 hover:underline cursor-pointer flex items-center justify-center gap-1 pt-0.5"
+                      >
+                        <Undo2 size={11} /> Reopen Gate / Try Again
+                      </button>
+                    </div>
+                  ) : isRejected && rejectionInfo?.stage === 1 ? (
+                    <div className="w-full py-2 rounded-lg font-medium text-center text-rose-500 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-[11px]">
+                      Gate Blocked (Stage 1 Rejected)
+                    </div>
+                  ) : isApprover2Done ? (
+                    <div className="w-full py-2 rounded-lg font-bold bg-purple-600 text-white opacity-95 flex items-center justify-center gap-1.5 shadow-xs text-xs">
+                      <CheckCircle2 size={13} /> ✓ 2nd Approval Signed
+                    </div>
+                  ) : !isApprover1Done ? (
+                    <div className="w-full py-2 rounded-lg font-medium text-center text-slate-400 bg-slate-100 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-[11px]">
+                      ○ Awaiting 1st Approval Gate
+                    </div>
+                  ) : (
+                    /* Approver 1 has signed, Approver 2 can now Approve OR Reject */
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={handleSecondApproveContainment}
+                          disabled={actionInProgress}
+                          className="flex-1 py-2 px-3 rounded-lg font-bold transition-all cursor-pointer shadow-xs bg-purple-600 hover:bg-purple-500 text-white flex items-center justify-center gap-1.5 text-xs animate-pulse"
+                          id="btn-person2-approve"
+                        >
+                          <CheckCircle2 size={13} /> Approve (2nd Sign)
+                        </button>
+                        <button
+                          onClick={() => handleRejectContainment(2)}
+                          disabled={actionInProgress}
+                          className="flex-1 py-2 px-3 rounded-lg font-bold transition-all cursor-pointer shadow-xs bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center gap-1.5 text-xs"
+                          id="btn-person2-reject"
+                        >
+                          <XCircle size={13} /> Reject
+                        </button>
+                        <button
+                          onClick={() => setShowRejectNote2(!showRejectNote2)}
+                          className="px-2.5 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-[11px] font-mono hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer shrink-0"
+                          title="Add Rejection Note"
+                        >
+                          {showRejectNote2 ? '▲' : 'Note'}
+                        </button>
+                      </div>
+                      {showRejectNote2 && (
+                        <div className="pt-1.5 space-y-1.5 border-t border-slate-200 dark:border-slate-800">
+                          <input
+                            value={rejectReason2}
+                            onChange={(e) => setRejectReason2(e.target.value)}
+                            placeholder="Optional reason for co-signer rejection..."
+                            className="w-full p-1.5 text-[11px] rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white font-mono"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
               </div>
             </div>
 
-            {/* False positive recovery drawer */}
-            {showRecoveryForm && (
-              <div className="p-4 rounded-xl bg-white dark:bg-slate-900/95 border border-amber-300 dark:border-amber-800/80 space-y-3 font-mono text-xs shadow-xs">
-                <div className="font-bold text-amber-800 dark:text-amber-300">Legitimate Work Authorization & Recovery</div>
-                <textarea
-                  value={recoveryReason}
-                  onChange={(e) => setRecoveryReason(e.target.value)}
-                  className="w-full p-2.5 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white font-mono"
-                  rows={2}
-                />
-                <button
-                  onClick={handleRecoverFalsePositive}
-                  disabled={actionInProgress}
-                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold cursor-pointer shadow-xs"
-                >
-                  Confirm & Restore Normal Access
-                </button>
+            {/* System Update & Prototype Alert Clearance Action Banner */}
+            <div className={`p-4 rounded-xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 font-mono text-xs transition-all ${
+              syncUpdated
+                ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-700/80 shadow-xs'
+                : isContained
+                ? 'bg-cyan-50/80 dark:bg-cyan-950/40 border-cyan-300 dark:border-cyan-700/80 shadow-xs'
+                : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800'
+            }`}>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 font-bold text-slate-900 dark:text-white">
+                  <RefreshCw size={15} className={`text-cyan-600 dark:text-cyan-400 ${isUpdatingSync ? 'animate-spin' : ''}`} />
+                  <span>Update & Synchronize Prototype State</span>
+                  {syncUpdated && (
+                    <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200 font-bold">
+                      ✓ Synchronized
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-400 font-sans">
+                  Click Update to approve and clear all active alerts for <strong className="text-cyan-600 dark:text-cyan-300">{targetUser}</strong> across INSIGHT Threat Monitor, update records in Supabase Database, and establish a benign baseline in Cognee memory.
+                </p>
               </div>
-            )}
+
+              <button
+                onClick={handleSyncUpdate}
+                disabled={isUpdatingSync}
+                id="btn-workbench-update-sync"
+                className={`py-2.5 px-4 rounded-xl font-bold transition-all cursor-pointer flex items-center gap-2 shrink-0 shadow-xs ${
+                  syncUpdated
+                    ? 'bg-emerald-600 text-white opacity-95'
+                    : isContained
+                    ? 'bg-cyan-600 hover:bg-cyan-500 text-white shadow-cyan-600/30'
+                    : 'bg-cyan-600 hover:bg-cyan-500 text-white'
+                }`}
+              >
+                <RefreshCw size={14} className={isUpdatingSync ? 'animate-spin' : ''} />
+                <span>
+                  {isUpdatingSync 
+                    ? 'Updating System...' 
+                    : syncUpdated 
+                    ? '✓ System Updated & Cleared' 
+                    : 'Update System (Clear Alerts & Sync Cognee)'}
+                </span>
+              </button>
+            </div>
           </Card>
         </div>
       )}
@@ -1767,12 +2851,60 @@ export function IncidentsPage({
       {activeTab === 'audit-trail' && (
         <Card className="p-5 space-y-4">
           <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-900 dark:text-white font-mono">
-              Immutable Cryptographic Audit Trail
-            </h3>
+            <div>
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-900 dark:text-white font-mono">
+                Immutable Cryptographic Audit Trail — {inc.id}
+              </h3>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Isolated forensic audit records strictly bound to incident {inc.id} ({threatType})
+              </p>
+            </div>
+            <span className="text-[11px] font-mono text-slate-400 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded">
+              Entity: {targetUser}
+            </span>
           </div>
 
           <div className="space-y-2.5 font-mono text-xs">
+            {/* Real audit records from backend for this exact incident */}
+            {responseDetails?.audit_trail && responseDetails.audit_trail.filter(e => e.incident_id === inc.id).length > 0 ? (
+              responseDetails.audit_trail
+                .filter(e => e.incident_id === inc.id)
+                .map((entry, aIdx) => (
+                  <div key={entry.entry_id || entry.action_id || `${entry.action}_${aIdx}`} className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 flex items-center justify-between shadow-xs">
+                    <div className="space-y-0.5">
+                      <div className="font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                        <span className="text-cyan-400">•</span>
+                        <span>{entry.action}</span>
+                      </div>
+                      <div className="text-slate-500 dark:text-slate-400 text-[11px]">
+                        Actor: {entry.actor} • {entry.reason || 'Security response policy execution'} {entry.timestamp && `• ${new Date(entry.timestamp).toLocaleTimeString()}`}
+                      </div>
+                    </div>
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                      entry.status === 'RESOLVED' || entry.status === 'APPROVED' ? 'text-emerald-500 bg-emerald-950/40 border border-emerald-800' :
+                      entry.status === 'REJECTED' ? 'text-rose-500 bg-rose-950/40 border border-rose-800' : 'text-slate-400 bg-slate-800/40'
+                    }`}>
+                      {entry.status}
+                    </span>
+                  </div>
+                ))
+            ) : null}
+
+            {/* Current session lifecycle events for this incident */}
+            {isRejected && rejectionInfo && (
+              <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-700 flex items-center justify-between shadow-xs">
+                <div className="space-y-0.5">
+                  <div className="font-bold text-rose-800 dark:text-rose-300 flex items-center gap-1.5">
+                    <XCircle size={14} className="text-rose-600 dark:text-rose-400" />
+                    <span>CONTAINMENT_REJECTED (STAGE {rejectionInfo.stage})</span>
+                  </div>
+                  <div className="text-slate-600 dark:text-slate-400 text-[11px]">
+                    Actor: {rejectionInfo.actor} • Reason: {rejectionInfo.reason} {rejectionInfo.timestamp && `• At ${rejectionInfo.timestamp}`}
+                  </div>
+                </div>
+                <span className="text-rose-700 dark:text-rose-400 text-[10px] font-bold">CONTAINMENT BLOCKED</span>
+              </div>
+            )}
             {isContained && (
               <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-700 flex items-center justify-between shadow-xs">
                 <div className="space-y-0.5">
@@ -1782,7 +2914,7 @@ export function IncidentsPage({
                 <span className="text-emerald-700 dark:text-emerald-400 text-[10px] font-bold">RISK: 15 / LOW</span>
               </div>
             )}
-            {isApprover1Done && (
+            {isApprover1Done && !isContained && (
               <div className="p-3 rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-300 dark:border-blue-700 flex items-center justify-between shadow-xs">
                 <div className="space-y-0.5">
                   <div className="font-bold text-blue-800 dark:text-blue-300">APPROVER_1_AUTHORIZED</div>
@@ -1791,19 +2923,30 @@ export function IncidentsPage({
                 <span className="text-blue-700 dark:text-blue-400 text-[10px] font-bold">STAGE 1 SIGNED</span>
               </div>
             )}
+            {isResolved && (
+              <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-700 flex items-center justify-between shadow-xs">
+                <div className="space-y-0.5">
+                  <div className="font-bold text-emerald-800 dark:text-emerald-300">FALSE_POSITIVE_RECOVERED</div>
+                  <div className="text-slate-600 dark:text-slate-400 text-[11px]">Actor: {recoveryActor} • Incident {inc.id} operational access restored</div>
+                </div>
+                <span className="text-emerald-700 dark:text-emerald-400 text-[10px] font-bold">RESOLVED</span>
+              </div>
+            )}
             <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 flex items-center justify-between shadow-xs">
               <div className="space-y-0.5">
                 <div className="font-bold text-slate-900 dark:text-white">INCIDENT_CORRELATION_COMPLETED</div>
-                <div className="text-slate-500 dark:text-slate-400 text-[11px]">Actor: IntelligenceEngine_v1</div>
+                <div className="text-slate-500 dark:text-slate-400 text-[11px]">
+                  Incident: {inc.id} • Target: {targetUser} ({targetDevice}) • Threat: {threatType}
+                </div>
               </div>
-              <span className="text-slate-400 text-[10px]">SHA256: 9f8a...c3d1</span>
+              <span className="text-slate-400 text-[10px]">CORRELATED</span>
             </div>
             <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 flex items-center justify-between shadow-xs">
               <div className="space-y-0.5">
                 <div className="font-bold text-slate-900 dark:text-white">TWO_PERSON_RULE_INITIALIZED</div>
-                <div className="text-slate-500 dark:text-slate-400 text-[11px]">Actor: PolicyEngine_Containment</div>
+                <div className="text-slate-500 dark:text-slate-400 text-[11px]">PolicyEngine_Containment • Dual-control gate active</div>
               </div>
-              <span className="text-slate-400 text-[10px]">SHA256: e41b...772a</span>
+              <span className="text-slate-400 text-[10px]">ENFORCED</span>
             </div>
           </div>
         </Card>

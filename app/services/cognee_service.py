@@ -96,6 +96,7 @@ class CogneeService:
                 "lon": 77.5946,
             },
         }
+        self._resolved_threat_users: Set[str] = set()
 
     async def get_historical_context(self, event: SecurityEvent) -> Dict[str, Any]:
         """Retrieves historical relationship context for the given event from Cognee
@@ -172,6 +173,12 @@ class CogneeService:
             "summary": "Activity is consistent with historical entity baseline.",
             "historical_baseline": {},
         }
+        # If user was explicitly approved/resolved by SOC analyst, treat as benign baseline
+        if event.user_id and event.user_id in getattr(self, "_resolved_threat_users", set()):
+            context_data["is_anomaly"] = False
+            context_data["summary"] = f"Activity verified and approved for user '{event.user_id}'. Cognee baseline cleared."
+            return context_data
+
         reasons_found: List[str] = []
 
         # 1. Agent -> Tool historical relationship
@@ -333,4 +340,76 @@ class CogneeService:
                 }
         except Exception as e:
             logger.warning(f"Failed to record context into Cognee cache: {e}")
+
+    async def resolve_user_threats(
+        self,
+        user_id: str,
+        device_id: Optional[str] = None,
+        ip: Optional[str] = None,
+        resource: Optional[str] = None,
+        reason: str = "Analyst dual-control approval & baseline sync",
+    ) -> Dict[str, Any]:
+        """Synchronizes Cognee knowledge graph baseline upon analyst approval.
+        Clears threat context, whitelists accessed devices/IPs/resources, and establishes
+        a benign operational baseline for the user.
+        """
+        if not user_id:
+            return {"status": "skipped", "reason": "No user_id provided"}
+
+        if not hasattr(self, "_resolved_threat_users"):
+            self._resolved_threat_users = set()
+        self._resolved_threat_users.add(user_id)
+
+        # Whitelist device in user's profile
+        if device_id:
+            self._user_known_devices.setdefault(user_id, set()).add(device_id)
+
+        # Whitelist IP in user's profile
+        if ip:
+            self._user_known_ips.setdefault(user_id, set()).add(str(ip).strip())
+
+        # Whitelist resource into role or user profile
+        if resource:
+            user_role = self._user_roles.get(user_id, "Analyst")
+            self._role_allowed_resources.setdefault(user_role, set()).add(resource.lower())
+
+        # Reset location timestamp so impossible travel checks don't mismatch
+        if user_id in self._user_last_locations:
+            self._user_last_locations[user_id]["timestamp"] = datetime.now(timezone.utc)
+
+        # Remote Cognee sync if configured
+        if self.api_key:
+            try:
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "entity_id": user_id,
+                    "action": "WHITELIST_BASELINE",
+                    "reason": reason,
+                    "metadata": {
+                        "device_id": device_id,
+                        "ip": ip,
+                        "resource": resource,
+                        "cleared_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                }
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    await client.post(
+                        f"{self.api_url}/api/v1/context/whitelist",
+                        json=payload,
+                        headers=headers,
+                    )
+            except Exception as e:
+                logger.warning(f"Cognee remote whitelist update error: {e}")
+
+        logger.info(f"Cognee baseline synchronized and threat context cleared for user '{user_id}'.")
+        return {
+            "status": "success",
+            "user_id": user_id,
+            "cognee_baseline_updated": True,
+            "reason": reason,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 

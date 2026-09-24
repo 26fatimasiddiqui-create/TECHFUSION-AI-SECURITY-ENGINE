@@ -101,3 +101,29 @@ async def replay_voice_endpoint(
             detail=f"Security alert '{alert_id}' not found.",
         )
     return alert
+
+
+class AlertResolveRequest(BaseModel):
+    actor: str = Field(default="SOC_Analyst", description="Actor resolving the alert")
+    reason: str = Field(default="Resolved by SOC Operator", description="Resolution justification note")
+
+
+@router.post("/{alert_id}/resolve", response_model=SecurityAlert, summary="Resolve single security alert")
+async def resolve_alert_endpoint(
+    alert_id: str,
+    payload: AlertResolveRequest = AlertResolveRequest(),
+    alert_svc: AlertService = Depends(get_alert_service),
+):
+    """Resolves an individual security alert, ensuring other queued alerts remain active."""
+    alert = await alert_svc.resolve_single_alert(
+        alert_id=alert_id,
+        reason=payload.reason,
+        actor=payload.actor,
+    )
+    if not alert:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Security alert '{alert_id}' not found.",
+        )
+    return alert
+

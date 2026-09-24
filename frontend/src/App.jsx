@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Layout } from './components/layout/Layout';
-import { OverviewPage } from './pages/OverviewPage';
 import { InternalThreatsPage } from './pages/InternalThreatsPage';
 import { ExternalThreatsPage } from './pages/ExternalThreatsPage';
 import { LiveEventsPage } from './pages/LiveEventsPage';
@@ -8,6 +7,8 @@ import { IncidentsPage } from './pages/IncidentsPage';
 import { UserActivityGraphPage } from './pages/UserActivityGraphPage';
 import { RiskAnalysisPage } from './pages/RiskAnalysisPage';
 import { AlertsPage } from './pages/AlertsPage';
+import { InsightDashboardPage } from './pages/InsightDashboardPage';
+import { EasyDashboardPage } from './pages/EasyDashboardPage';
 import { LoadingSpinner } from './components/common/LoadingSpinner';
 import { ErrorBanner } from './components/common/ErrorBanner';
 import { Modal } from './components/common/Modal';
@@ -20,18 +21,21 @@ import {
   ingestEvent, 
   getHealth,
   acknowledgeAlert,
-  replayAlertVoice
+  replayAlertVoice,
+  resolveAlert
 } from './services/api';
 import { CriticalIncidentBanner } from './components/alerts/CriticalIncidentBanner';
 import { voiceAlertService } from './services/voiceAlertService';
+import { approveAllAlertsForUserInSupabase } from './services/insightSupabase';
 
 export function App() {
-  const [currentTab, setCurrentTab] = useState('overview');
+  const [currentTab, setCurrentTab] = useState('insight');
   
   // Real API data states
   const [events, setEvents] = useState([]);
   const [incidents, setIncidents] = useState([]);
   const [alerts, setAlerts] = useState([]);
+  const [supabaseAlertCount, setSupabaseAlertCount] = useState(null);
   
   // UX states
   const [isLoading, setIsLoading] = useState(true);
@@ -85,15 +89,68 @@ export function App() {
     // Handle Alerts
     if (alertsRes.status === 'fulfilled') {
       const fetchedAlerts = alertsRes.value;
-      setAlerts(fetchedAlerts);
+      const fetchedIncidents = incidentsRes.status === 'fulfilled' ? incidentsRes.value : [];
+      const incMap = new Map(fetchedIncidents.map(i => [i.id, i]));
+
+      // Synchronize alerts with authoritative incidents
+      const syncedAlerts = fetchedAlerts.map(alt => {
+        const linkedInc = alt.incident_id ? incMap.get(alt.incident_id) : fetchedIncidents.find(i => 
+          (alt.event_id && i.event_ids && i.event_ids.includes(alt.event_id)) ||
+          (alt.primary_entity && i.primary_entity === alt.primary_entity)
+        );
+        if (!linkedInc) return alt;
+
+        const incStatus = (linkedInc.status || 'active').toLowerCase();
+        const incScore = linkedInc.risk_assessment?.risk_score ?? linkedInc.risk_score;
+
+        if (incStatus === 'contained') {
+          return {
+            ...alt,
+            status: 'contained',
+            risk_score: Math.min(alt.risk_score ?? 15, incScore ?? 15, 15),
+            risk_level: 'LOW',
+            severity: 'LOW',
+            title: alt.title?.includes('CRITICAL') ? `[Contained] ${alt.threat_type || 'Threat Contained'}` : alt.title,
+            message: `Threat contained. Risk score reduced to ${Math.min(alt.risk_score ?? 15, incScore ?? 15, 15)}.`
+          };
+        }
+        if (['resolved', 'mitigated', 'recovered'].includes(incStatus)) {
+          return {
+            ...alt,
+            status: incStatus,
+            risk_score: 0,
+            risk_level: 'LOW',
+            severity: 'LOW',
+            title: alt.title?.includes('CRITICAL') ? `[Resolved] ${alt.threat_type || 'Threat Resolved'}` : alt.title,
+            message: 'Threat resolved.'
+          };
+        }
+        return alt;
+      });
+
+      setAlerts(syncedAlerts);
       setAlertsError(null);
 
       // Automated voice alert announcement for top unacknowledged critical/high alert
-      const topUrgent = fetchedAlerts.find(a => 
-        (a.risk_level?.toUpperCase() === 'CRITICAL' || a.risk_level?.toUpperCase() === 'HIGH') &&
-        a.status !== 'resolved' &&
-        !a.acknowledged
-      );
+      // MUST NOT play for contained, resolved, mitigated, or recovered incidents
+      const topUrgent = syncedAlerts.find(a => {
+        if (a.acknowledged) return false;
+        if (a.status === 'resolved' || a.status === 'contained' || a.status === 'mitigated' || a.status === 'recovered') return false;
+        if (a.risk_score !== undefined && a.risk_score <= 25) return false;
+
+        if (a.incident_id) {
+          const linkedInc = incMap.get(a.incident_id);
+          if (linkedInc) {
+            const incStatus = (linkedInc.status || '').toLowerCase();
+            if (['contained', 'resolved', 'mitigated', 'recovered'].includes(incStatus)) return false;
+            const incScore = linkedInc.risk_assessment?.risk_score ?? linkedInc.risk_score;
+            if (incScore !== undefined && incScore <= 25) return false;
+          }
+        }
+
+        return (a.risk_level?.toUpperCase() === 'CRITICAL' || a.risk_level?.toUpperCase() === 'HIGH');
+      });
+
       if (topUrgent) {
         voiceAlertService.speakAlert(topUrgent);
       }
@@ -157,7 +214,7 @@ export function App() {
       }
 
       await fetchData(true);
-      setCurrentTab('overview');
+      setCurrentTab('insight');
     } catch (err) {
       console.error('Normal demo flow injection failed:', err);
       setGlobalError(`Simulation error: ${err.message || 'Failed to inject normal flow'}`);
@@ -217,7 +274,7 @@ export function App() {
       }
 
       await fetchData(true);
-      setCurrentTab('overview');
+      setCurrentTab('insight');
     } catch (err) {
       console.error('Threat demo sequence injection failed:', err);
       setGlobalError(`Simulation error: ${err.message || 'Failed to inject threat attack chain'}`);
@@ -306,7 +363,7 @@ export function App() {
       }
 
       await fetchData(true);
-      setCurrentTab('overview');
+      setCurrentTab('insight');
     } catch (err) {
       console.error('External threat demo injection failed:', err);
       setGlobalError(`Simulation error: ${err.message || 'Failed to inject external attack chain'}`);
@@ -351,7 +408,7 @@ export function App() {
       }
 
       await fetchData(true);
-      setCurrentTab('overview');
+      setCurrentTab('insight');
     } catch (err) {
       console.error('External benign flow injection failed:', err);
       setGlobalError(`Simulation error: ${err.message || 'Failed to inject external benign flow'}`);
@@ -362,11 +419,254 @@ export function App() {
 
   const handleRunDemoAttack = handleRunSuspiciousThreatFlow;
 
-  // Step 6: Identify top active critical or high alert for persistent dashboard banner
-  const activeCriticalAlert = alerts.find(a => 
-    (a.risk_level?.toUpperCase() === 'CRITICAL' || a.risk_level?.toUpperCase() === 'HIGH') && 
-    a.status !== 'resolved'
-  );
+  // Set of alert IDs dismissed by the user
+  const [dismissedAlertIds, setDismissedAlertIds] = useState(new Set());
+
+  // Step 6: Sequential queue of active critical or high alerts for persistent dashboard banner
+  // Filter out any alert that is resolved, contained, mitigated, approved, acknowledged, or has risk score <= 25
+  const pendingCriticalAlerts = alerts.filter(a => {
+    if (dismissedAlertIds.has(a.alert_id || a.id)) return false;
+    if (a.acknowledged) return false;
+    if (a.status === 'resolved' || a.status === 'contained' || a.status === 'mitigated' || a.status === 'recovered') return false;
+    if (a.approval_state === 'APPROVED' || a.approval_state === 'RESOLVED') return false;
+    if (a.risk_score !== undefined && a.risk_score <= 25) return false;
+
+    // Cross-reference with authoritative incident record
+    if (a.incident_id) {
+      const linkedInc = incidents.find(i => i.id === a.incident_id);
+      if (linkedInc) {
+        const incStatus = (linkedInc.status || '').toLowerCase();
+        if (incStatus === 'contained' || incStatus === 'resolved' || incStatus === 'mitigated' || incStatus === 'recovered') {
+          return false;
+        }
+        const incScore = linkedInc.risk_assessment?.risk_score ?? linkedInc.risk_score;
+        if (incScore !== undefined && incScore <= 25) {
+          return false;
+        }
+      }
+    }
+
+    return (
+      (a.risk_level || a.severity || '').toUpperCase() === 'CRITICAL' ||
+      (a.risk_level || a.severity || '').toUpperCase() === 'HIGH' ||
+      (a.risk_score || 0) >= 60
+    );
+  });
+
+  const activeCriticalAlert = pendingCriticalAlerts[0] || null;
+  const pendingAlertQueueCount = pendingCriticalAlerts.length;
+
+  const handleDismissBanner = (alertId) => {
+    setDismissedAlertIds(prev => new Set([...prev, alertId]));
+  };
+
+  // Dedicated single-alert resolver: resolves ONLY the targeted alert in isolation
+  const handleAlertResolved = useCallback(async (alertId) => {
+    try {
+      await resolveAlert(alertId, {
+        resolution_reason: 'Alert resolved via Security Operations Console',
+        actor: 'soc_operator'
+      });
+    } catch (err) {
+      console.warn('API resolve alert notice:', err);
+    }
+
+    // Update ONLY the targeted alert in local state
+    setAlerts(prev => prev.map(alt => {
+      if (alt.alert_id === alertId || alt.id === alertId) {
+        return {
+          ...alt,
+          status: 'resolved',
+          risk_score: 0,
+          risk_level: 'RESOLVED',
+          approval_state: 'RESOLVED',
+          response_state: 'RESTORED',
+          acknowledged: true,
+          is_mitigated: true
+        };
+      }
+      return alt;
+    }));
+
+    // Dismiss only this alert so the next queued alert advances into the banner
+    setDismissedAlertIds(prev => new Set([...prev, alertId]));
+  }, []);
+
+  const handleIncidentStatusChange = useCallback((incidentId, newStatus, newScore, approvalState = 'APPROVED', isAck = true) => {
+    // 1. Update incidents list
+    setIncidents(prev => prev.map(inc => {
+      if (inc.id === incidentId) {
+        return {
+          ...inc,
+          status: newStatus,
+          risk_assessment: {
+            ...inc.risk_assessment,
+            risk_score: newScore ?? (newStatus === 'contained' ? 15 : newStatus === 'resolved' ? 0 : inc.risk_assessment?.risk_score),
+            risk_level: newStatus === 'contained' || newStatus === 'resolved' || (newScore !== null && newScore <= 25) ? 'LOW' : inc.risk_assessment?.risk_level
+          }
+        };
+      }
+      return inc;
+    }));
+
+    // 1b. Also update selectedIncident if it matches this specific incidentId so detail views stay isolated and fresh
+    setSelectedIncident(prev => {
+      if (prev && prev.id === incidentId) {
+        return {
+          ...prev,
+          status: newStatus,
+          risk_assessment: {
+            ...prev.risk_assessment,
+            risk_score: newScore ?? (newStatus === 'contained' ? 15 : newStatus === 'resolved' ? 0 : prev.risk_assessment?.risk_score),
+            risk_level: newStatus === 'contained' || newStatus === 'resolved' || (newScore !== null && newScore <= 25) ? 'LOW' : prev.risk_assessment?.risk_level
+          }
+        };
+      }
+      return prev;
+    });
+
+    // 2. Update matching alerts - STRICT EQUALITY! Resolving an incident only touches alerts bound to this specific incident
+    setAlerts(prev => prev.map(alt => {
+      const isMatch = alt.incident_id && alt.incident_id === incidentId;
+      if (isMatch) {
+        const isContained = newStatus === 'contained';
+        const isResolved = newStatus === 'resolved';
+        return {
+          ...alt,
+          status: newStatus,
+          title: isContained
+            ? (alt.title?.includes('CRITICAL') ? `[Contained] ${alt.threat_type || 'Threat Contained'}` : alt.title)
+            : isResolved
+            ? (alt.title?.includes('CRITICAL') ? `[Resolved] ${alt.threat_type || 'Threat Resolved'}` : alt.title)
+            : alt.title,
+          message: isContained
+            ? `Threat contained. Risk score reduced to ${newScore ?? 15}.`
+            : isResolved
+            ? 'Threat resolved.'
+            : alt.message,
+          acknowledged: isAck || alt.acknowledged || isContained || isResolved,
+          approval_state: approvalState,
+          risk_score: newScore ?? (isContained ? 15 : isResolved ? 0 : alt.risk_score),
+          risk_level: isContained || isResolved || (newScore !== null && newScore <= 25) ? 'LOW' : alt.risk_level,
+          severity: isContained || isResolved || (newScore !== null && newScore <= 25) ? 'LOW' : (alt.severity || alt.risk_level),
+          response_state: isContained ? 'CONTAINMENT_ACTIVE' : isResolved ? 'RESTORED' : approvalState === 'REJECTED' ? 'CONTAINMENT_REJECTED' : alt.response_state
+        };
+      }
+      return alt;
+    }));
+
+    // 3. Immediately dismiss ONLY matching alerts from top banner
+    if (newStatus === 'contained' || newStatus === 'resolved' || isAck) {
+      setDismissedAlertIds(prev => {
+        const next = new Set(prev);
+        alerts.forEach(alt => {
+          if (alt.incident_id && alt.incident_id === incidentId) {
+            next.add(alt.alert_id);
+          }
+        });
+        return next;
+      });
+    }
+  }, [alerts]);
+
+  // Prototype-wide synchronization when an analyst approves and clicks Update
+  const handleSyncUpdateUser = useCallback(async ({ incidentId, userId, incident }) => {
+    try {
+      const cleanUser = String(userId || '').trim().toLowerCase();
+
+      // 1. Update incidents list
+      setIncidents(prev => prev.map(inc => {
+        const matchesInc = (inc.id === incidentId) || 
+          (cleanUser && inc.primary_entity && inc.primary_entity.toLowerCase() === cleanUser) ||
+          (cleanUser && inc.entity_id && String(inc.entity_id).toLowerCase() === cleanUser);
+        if (matchesInc) {
+          return {
+            ...inc,
+            status: 'contained',
+            risk_assessment: {
+              ...inc.risk_assessment,
+              risk_score: 15,
+              risk_level: 'LOW'
+            }
+          };
+        }
+        return inc;
+      }));
+
+      // 1b. Update selectedIncident if matched
+      setSelectedIncident(prev => {
+        if (!prev) return prev;
+        const matchesInc = (prev.id === incidentId) || 
+          (cleanUser && prev.primary_entity && prev.primary_entity.toLowerCase() === cleanUser) ||
+          (cleanUser && prev.entity_id && String(prev.entity_id).toLowerCase() === cleanUser);
+        if (matchesInc) {
+          return {
+            ...prev,
+            status: 'contained',
+            risk_assessment: {
+              ...prev.risk_assessment,
+              risk_score: 15,
+              risk_level: 'LOW'
+            }
+          };
+        }
+        return prev;
+      });
+
+      // 2. Clear / mark resolved ALL alerts for this user across entire prototype
+      setAlerts(prev => prev.map(alt => {
+        const matchesEntity = 
+          (alt.primary_entity && alt.primary_entity.toLowerCase() === cleanUser) ||
+          (alt.affected_entity && alt.affected_entity.toLowerCase() === cleanUser) ||
+          (alt.user_id && alt.user_id.toLowerCase() === cleanUser) ||
+          (alt.incident_id && alt.incident_id === incidentId) ||
+          (alt.message && cleanUser && alt.message.toLowerCase().includes(cleanUser));
+
+        if (matchesEntity) {
+          return {
+            ...alt,
+            status: 'resolved',
+            risk_score: 0,
+            risk_level: 'RESOLVED',
+            severity: 'RESOLVED',
+            approval_state: 'APPROVED',
+            response_state: 'RESTORED',
+            acknowledged: true,
+            is_mitigated: true,
+            title: `[Resolved] ${alt.threat_type || 'Threat Resolved'}`,
+            message: `Threat approved and resolved by analyst for ${userId}.`
+          };
+        }
+        return alt;
+      }));
+
+      // 3. Immediately dismiss any alerts matching this user from top critical banner
+      setDismissedAlertIds(prev => {
+        const next = new Set(prev);
+        alerts.forEach(alt => {
+          const matchesEntity = 
+            (alt.primary_entity && alt.primary_entity.toLowerCase() === cleanUser) ||
+            (alt.affected_entity && alt.affected_entity.toLowerCase() === cleanUser) ||
+            (alt.user_id && alt.user_id.toLowerCase() === cleanUser) ||
+            (alt.incident_id && alt.incident_id === incidentId) ||
+            (alt.message && cleanUser && alt.message.toLowerCase().includes(cleanUser));
+
+          if (matchesEntity) {
+            next.add(alt.alert_id || alt.id);
+          }
+        });
+        return next;
+      });
+
+      // 4. Update Supabase alerts table directly
+      await approveAllAlertsForUserInSupabase(userId).catch(e => console.warn('Supabase bulk alert approve notice:', e));
+
+      // 5. Silent refresh to ensure database and backend telemetry are synchronized
+      await fetchData(true);
+    } catch (err) {
+      console.error('Error handling sync update user:', err);
+    }
+  }, [alerts, fetchData]);
 
   const handleBannerAcknowledge = async (alertId) => {
     try {
@@ -402,7 +702,7 @@ export function App() {
     <Layout
       currentTab={currentTab}
       setTab={setCurrentTab}
-      alertCount={alerts.filter(a => a.status === 'active' || a.status === 'escalated').length}
+      alertCount={supabaseAlertCount !== null ? supabaseAlertCount : alerts.filter(a => a.status === 'active' || a.status === 'escalated').length}
       onRefresh={() => fetchData(false)}
       isRefreshing={isRefreshing}
       onRunDemo={handleRunDemoAttack}
@@ -422,31 +722,30 @@ export function App() {
       {activeCriticalAlert && (
         <CriticalIncidentBanner
           alert={activeCriticalAlert}
+          queueCount={pendingAlertQueueCount}
           onSelectIncident={(inc) => {
             setSelectedIncident(inc);
             setCurrentTab('incidents');
           }}
           onAcknowledge={handleBannerAcknowledge}
+          onResolveAlert={handleAlertResolved}
           onReplayVoice={handleBannerReplayVoice}
           onOpenActionCenter={handleBannerOpenActionCenter}
+          onDismiss={handleDismissBanner}
         />
       )}
 
       {/* Pages rendered with individual UX states */}
-      {currentTab === 'overview' && (
-        <OverviewPage
-          events={events}
-          incidents={incidents}
-          alerts={alerts}
-          isLoading={isLoading}
-          error={eventsError || incidentsError || alertsError}
-          onRetry={() => fetchData(false)}
-          onSelectIncident={(inc) => {
-            setSelectedIncident(inc);
-            setCurrentTab('incidents');
-          }}
-          onSelectAlert={(alt) => setInspectedAlert(alt)}
+      {currentTab === 'easy-dashboard' && (
+        <EasyDashboardPage
           setTab={setCurrentTab}
+          onActiveAlertCountChange={(count) => setSupabaseAlertCount(count)}
+        />
+      )}
+
+      {currentTab === 'insight' && (
+        <InsightDashboardPage 
+          onActiveAlertCountChange={(count) => setSupabaseAlertCount(count)}
         />
       )}
 
@@ -478,6 +777,7 @@ export function App() {
             setSelectedIncident(inc);
             setCurrentTab('incidents');
           }}
+          onIncidentStatusChange={handleIncidentStatusChange}
           setTab={setCurrentTab}
           onRunExternalNormal={handleRunExternalNormalFlow}
           onRunExternalAttack={handleRunExternalAttackFlow}
@@ -501,17 +801,22 @@ export function App() {
       {currentTab === 'incidents' && (
         <IncidentsPage
           incidents={incidents}
+          alerts={alerts}
           selectedIncident={selectedIncident}
           setSelectedIncident={setSelectedIncident}
           isLoading={isLoading}
           error={incidentsError}
           onRetry={() => fetchData(false)}
+          onIncidentStatusChange={handleIncidentStatusChange}
+          onSyncUpdateUser={handleSyncUpdateUser}
         />
       )}
 
       {currentTab === 'graph' && (
         <UserActivityGraphPage
           events={events}
+          incidents={incidents}
+          alerts={alerts}
           targetUser={selectedGraphUser}
           setTargetUser={setSelectedGraphUser}
           onSelectIncident={(inc) => {
@@ -547,11 +852,13 @@ export function App() {
           isLoading={isLoading}
           error={alertsError}
           onRefresh={() => fetchData(true)}
+          onResolveAlert={handleAlertResolved}
           onSelectAlert={(alt) => setInspectedAlert(alt)}
           onSelectIncident={(inc) => {
             setSelectedIncident(inc);
             setCurrentTab('incidents');
           }}
+          onActiveAlertCountChange={(count) => setSupabaseAlertCount(count)}
           setTab={setCurrentTab}
         />
       )}
@@ -574,6 +881,32 @@ export function App() {
               {inspectedEvent.agent_id && <div><span className="text-slate-500">Agent:</span> <span className="text-purple-400">{inspectedEvent.agent_id}</span></div>}
               {inspectedEvent.tool_name && <div><span className="text-slate-500">Tool:</span> <span className="text-purple-400">{inspectedEvent.tool_name}</span></div>}
             </div>
+
+            {(() => {
+              const correlatedIncident = incidents.find(i => 
+                i.event_ids?.includes(inspectedEvent.id) || 
+                (inspectedEvent.metadata?.incident_id && i.id === inspectedEvent.metadata.incident_id)
+              );
+              if (!correlatedIncident) return null;
+              return (
+                <div className="p-3 bg-rose-950/40 border border-rose-800/60 rounded-xl flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[11px] font-bold text-rose-300">Correlated Threat Incident</div>
+                    <div className="text-[10px] font-mono text-slate-400">Incident: {correlatedIncident.id} ({correlatedIncident.status?.toUpperCase() || 'ACTIVE'})</div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setSelectedIncident(correlatedIncident);
+                      setInspectedEvent(null);
+                      setCurrentTab('incidents');
+                    }}
+                    className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold font-mono transition-colors cursor-pointer"
+                  >
+                    Open Action Center
+                  </button>
+                </div>
+              );
+            })()}
 
             <div>
               <div className="text-[11px] font-semibold uppercase text-slate-400 mb-1">Full Telemetry JSON Payload</div>

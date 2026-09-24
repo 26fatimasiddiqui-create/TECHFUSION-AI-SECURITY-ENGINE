@@ -31,6 +31,13 @@ import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { ErrorBanner } from '../components/common/ErrorBanner';
 import { LiveSecurityGraph } from '../components/common/LiveSecurityGraph';
 import { getUsers, getUserActivityGraph } from '../services/api';
+import {
+  fetchEmployeesFromSupabase,
+  fetchAlertsFromSupabase,
+  fetchRiskEventsFromSupabase,
+  calculateRiskLevel,
+  isSupabaseConfigured
+} from '../services/insightSupabase';
 
 // Icon and color mapping per node type
 const NODE_TYPE_CONFIG = {
@@ -54,6 +61,18 @@ const RISK_CONFIG = {
     ring: 'ring-emerald-500/30 border-emerald-600/40',
     edgeColor: '#10b981',
   },
+  resolved: {
+    label: 'Resolved',
+    badgeBg: 'bg-emerald-950/90 text-emerald-300 border-emerald-600 shadow-[0_0_8px_rgba(16,185,129,0.3)]',
+    ring: 'ring-emerald-500/50 border-emerald-500 shadow-md shadow-emerald-950/50',
+    edgeColor: '#10b981',
+  },
+  contained: {
+    label: 'Contained',
+    badgeBg: 'bg-indigo-950/90 text-indigo-300 border-indigo-600 shadow-[0_0_8px_rgba(99,102,241,0.3)]',
+    ring: 'ring-indigo-500/50 border-indigo-500 shadow-md shadow-indigo-950/50',
+    edgeColor: '#6366f1',
+  },
   unusual: {
     label: 'Unusual',
     badgeBg: 'bg-sky-950/80 text-sky-300 border-sky-700',
@@ -76,6 +95,8 @@ const RISK_CONFIG = {
 
 export function UserActivityGraphPage({ 
   events = [],
+  incidents = [],
+  alerts = [],
   onSelectIncident, 
   onSelectEvent,
   onRunDemo,
@@ -89,12 +110,42 @@ export function UserActivityGraphPage({
   const [isGraphLoading, setIsGraphLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  // Supabase real monitoring data
+  const [supabaseEmployees, setSupabaseEmployees] = useState([]);
+  const [supabaseAlerts, setSupabaseAlerts] = useState([]);
+  const [supabaseRiskEvents, setSupabaseRiskEvents] = useState([]);
+  const [isSupabaseLoading, setIsSupabaseLoading] = useState(false);
+  const [selectedSupabaseEmployee, setSelectedSupabaseEmployee] = useState(null);
+
   // Sync with targetUser if passed from parent
   useEffect(() => {
     if (targetUser) {
       setSelectedUserId(targetUser);
     }
   }, [targetUser]);
+
+  // Fetch Supabase employees + alerts on mount
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+    setIsSupabaseLoading(true);
+    Promise.all([
+      fetchEmployeesFromSupabase(),
+      fetchAlertsFromSupabase(),
+      fetchRiskEventsFromSupabase()
+    ]).then(([empRes, altRes, riskRes]) => {
+      setSupabaseEmployees(empRes.data || []);
+      setSupabaseAlerts(altRes.data || []);
+      setSupabaseRiskEvents(riskRes.data || []);
+      // Auto-select the highest risk employee
+      if (empRes.data && empRes.data.length > 0 && !selectedSupabaseEmployee) {
+        setSelectedSupabaseEmployee(empRes.data[0]);
+      }
+    }).catch(err => {
+      console.warn('Supabase data fetch failed in ActivityGraph:', err);
+    }).finally(() => {
+      setIsSupabaseLoading(false);
+    });
+  }, []);
 
   // View mode & Filter states
   const [graphMode, setGraphMode] = useState('live_security_graph'); // 'live_security_graph' | 'entity_tiers'
@@ -128,10 +179,10 @@ export function UserActivityGraphPage({
   }, [selectedUserId, targetUser]);
 
   useEffect(() => {
-    fetchUsers();
-  }, [fetchUsers]);
+    fetchUsers(true);
+  }, [fetchUsers, incidents, alerts]);
 
-  // 2. Fetch User Activity Graph whenever selectedUserId changes
+  // 2. Fetch User Activity Graph whenever selectedUserId changes or incidents/alerts update
   const fetchGraph = useCallback(async (userId) => {
     if (!userId) return;
     setIsGraphLoading(true);
@@ -158,7 +209,8 @@ export function UserActivityGraphPage({
     if (selectedUserId) {
       fetchGraph(selectedUserId);
     }
-  }, [selectedUserId, fetchGraph]);
+  }, [selectedUserId, fetchGraph, incidents, alerts]);
+
 
   // Derived filtered nodes and edges
   const filteredNodes = useMemo(() => {
@@ -201,6 +253,33 @@ export function UserActivityGraphPage({
     if (!selectedEdgeId || !graphData?.edges) return null;
     return graphData.edges.find(e => e.id === selectedEdgeId) || null;
   }, [selectedEdgeId, graphData]);
+
+  // Derive the correlated incident for the currently inspected node or overall graph
+  const linkedIncident = useMemo(() => {
+    const candidateIncidents = (graphData?.incidents && graphData.incidents.length > 0)
+      ? graphData.incidents
+      : incidents;
+    if (!candidateIncidents || candidateIncidents.length === 0) return null;
+
+    // 1. If an inspected node has event_ids, find incident containing one of those event_ids
+    if (inspectedNode?.event_ids && inspectedNode.event_ids.length > 0) {
+      const match = candidateIncidents.find(inc => 
+        inc.event_ids?.some(eid => inspectedNode.event_ids.includes(eid))
+      );
+      if (match) {
+        return incidents.find(i => i.id === match.id) || match;
+      }
+    }
+
+    // 2. Prioritize an active/uncontained incident from the candidate list
+    const activeMatch = candidateIncidents.find(inc => inc.status === 'active' || !inc.status);
+    if (activeMatch) {
+      return incidents.find(i => i.id === activeMatch.id) || activeMatch;
+    }
+
+    const first = candidateIncidents[0];
+    return incidents.find(i => i.id === first.id) || first;
+  }, [graphData, incidents, inspectedNode]);
 
   // Group nodes by entity tier for visual presentation
   const tierGroups = useMemo(() => {
@@ -341,6 +420,120 @@ export function UserActivityGraphPage({
         />
       )}
 
+      {/* Supabase Monitoring Stats — shows real data from 1000 monitored employees */}
+      {supabaseEmployees.length > 0 && (
+        <div className="p-4 rounded-2xl border border-cyan-900/60 bg-cyan-950/20 space-y-3">
+          <div className="flex items-center gap-2 text-xs font-bold text-cyan-400 uppercase tracking-wider">
+            <ShieldAlert size={14} className="text-rose-400 animate-pulse" />
+            <span>Live Supabase Monitoring — {supabaseEmployees.length} Employees Tracked</span>
+            {isSupabaseLoading && <RefreshCw size={12} className="animate-spin ml-1 text-slate-400" />}
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+            <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800 space-y-0.5">
+              <span className="text-[10px] text-slate-400 uppercase font-bold block">Monitored</span>
+              <span className="text-xl font-black text-cyan-300 font-mono">{supabaseEmployees.length}</span>
+            </div>
+            <div className="p-3 rounded-xl bg-rose-950/30 border border-rose-800/60 space-y-0.5">
+              <span className="text-[10px] text-rose-400 uppercase font-bold block">Active Alerts</span>
+              <span className="text-xl font-black text-rose-300 font-mono">
+                {supabaseAlerts.filter(a => {
+                  const s = (a.status || '').toLowerCase();
+                  return !['approved','resolved','dismissed','closed'].includes(s);
+                }).length}
+              </span>
+            </div>
+            <div className="p-3 rounded-xl bg-orange-950/30 border border-orange-800/60 space-y-0.5">
+              <span className="text-[10px] text-orange-400 uppercase font-bold block">Critical</span>
+              <span className="text-xl font-black text-orange-300 font-mono">
+                {supabaseAlerts.filter(a => (a.risk_score || 0) >= 85).length}
+              </span>
+            </div>
+            <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-800/60 space-y-0.5">
+              <span className="text-[10px] text-amber-400 uppercase font-bold block">High Risk</span>
+              <span className="text-xl font-black text-amber-300 font-mono">
+                {supabaseAlerts.filter(a => (a.risk_score || 0) >= 70 && (a.risk_score || 0) < 85).length}
+              </span>
+            </div>
+            <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800 space-y-0.5">
+              <span className="text-[10px] text-slate-400 uppercase font-bold block">Risk Events</span>
+              <span className="text-xl font-black text-purple-300 font-mono">{supabaseRiskEvents.length}</span>
+            </div>
+            <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800 space-y-0.5">
+              <span className="text-[10px] text-slate-400 uppercase font-bold block">Approved</span>
+              <span className="text-xl font-black text-emerald-300 font-mono">
+                {supabaseAlerts.filter(a => (a.status || '').toLowerCase() === 'approved').length}
+              </span>
+            </div>
+          </div>
+
+          {/* Top risky employees list */}
+          <div className="space-y-1">
+            <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Top Risk Employees (click to inspect)</span>
+            <div className="flex flex-wrap gap-2 max-h-20 overflow-y-auto">
+              {supabaseEmployees.slice(0, 12).map(emp => {
+                const empAlerts = supabaseAlerts.filter(a => a.employee_id === emp.id);
+                const activeCount = empAlerts.filter(a => {
+                  const s = (a.status || '').toLowerCase();
+                  return !['approved','resolved','dismissed','closed'].includes(s);
+                }).length;
+                const maxScore = empAlerts.reduce((max, a) => Math.max(max, a.risk_score || 0), 0);
+                const level = calculateRiskLevel(maxScore);
+                const isSelected = selectedSupabaseEmployee?.id === emp.id;
+                return (
+                  <button
+                    key={emp.id}
+                    onClick={() => setSelectedSupabaseEmployee(emp)}
+                    className={`px-2.5 py-1 rounded-lg border text-[10px] font-mono font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                      isSelected
+                        ? 'bg-rose-950/80 border-rose-500 text-rose-200 shadow-md shadow-rose-950/50'
+                        : 'bg-slate-900/80 border-slate-700 text-slate-300 hover:border-rose-700 hover:text-rose-300'
+                    }`}
+                  >
+                    <span>{emp.name || emp.employee_code}</span>
+                    {activeCount > 0 && (
+                      <span className="px-1 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-700/60 text-[9px]">
+                        {activeCount} alerts
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Selected employee alerts */}
+          {selectedSupabaseEmployee && (() => {
+            const empAlerts = supabaseAlerts.filter(a => a.employee_id === selectedSupabaseEmployee.id);
+            const activeEmpAlerts = empAlerts.filter(a => {
+              const s = (a.status || '').toLowerCase();
+              return !['approved','resolved','dismissed','closed'].includes(s);
+            });
+            return (
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-slate-200 font-mono">{selectedSupabaseEmployee.name} — Alert Feed</span>
+                  <span className="text-[10px] text-rose-400 font-mono">{activeEmpAlerts.length} active</span>
+                </div>
+                {activeEmpAlerts.length === 0 ? (
+                  <div className="text-[11px] text-emerald-400 font-mono">✓ No active alerts</div>
+                ) : (
+                  <div className="space-y-1 max-h-32 overflow-y-auto">
+                    {activeEmpAlerts.map(alt => (
+                      <div key={alt.id} className="flex items-center gap-2 text-[10px] font-mono p-1.5 rounded bg-rose-950/20 border border-rose-900/40">
+                        <Flame size={10} className="text-rose-500 shrink-0" />
+                        <span className="text-rose-300 font-bold shrink-0">{alt.alert_type || 'ALERT'}</span>
+                        <span className="text-slate-400 truncate flex-1">{alt.message}</span>
+                        <span className="text-rose-400 shrink-0">Score: {alt.risk_score}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
       {/* Summary KPI Strip */}
       {summary && (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
@@ -386,16 +579,19 @@ export function UserActivityGraphPage({
             <span className="text-[10px] uppercase font-semibold text-slate-400 tracking-wider block">Linked Incidents</span>
             <div className="mt-0.5 flex items-center gap-1.5">
               {summary.incident_ids && summary.incident_ids.length > 0 ? (
-                summary.incident_ids.map(incId => (
-                  <button
-                    key={incId}
-                    onClick={() => onSelectIncident && onSelectIncident({ id: incId })}
-                    className="text-xs font-mono font-bold text-rose-400 bg-rose-950/60 border border-rose-800/80 px-1.5 py-0.5 rounded hover:bg-rose-900/80 transition-all cursor-pointer flex items-center gap-1"
-                  >
-                    <Flame size={11} />
-                    {incId}
-                  </button>
-                ))
+                summary.incident_ids.map(incId => {
+                  const fullInc = incidents.find(i => i.id === incId) || { id: incId };
+                  return (
+                    <button
+                      key={incId}
+                      onClick={() => onSelectIncident && onSelectIncident(fullInc)}
+                      className="text-xs font-mono font-bold text-rose-400 bg-rose-950/60 border border-rose-800/80 px-1.5 py-0.5 rounded hover:bg-rose-900/80 transition-all cursor-pointer flex items-center gap-1"
+                    >
+                      <Flame size={11} />
+                      {incId}
+                    </button>
+                  );
+                })
               ) : (
                 <span className="text-xs text-slate-500 font-mono">None</span>
               )}
@@ -493,11 +689,14 @@ export function UserActivityGraphPage({
           {graphMode === 'live_security_graph' && (
             <LiveSecurityGraph
               events={events}
+              incidents={incidents}
+              alerts={alerts}
               onInvestigate={() => {
-                if (graphData?.incidents && graphData.incidents.length > 0 && onSelectIncident) {
-                  onSelectIncident({ id: graphData.incidents[0].id });
+                if (linkedIncident && onSelectIncident) {
+                  onSelectIncident(linkedIncident);
                 } else if (onSelectIncident) {
-                  onSelectIncident({ id: 'INC-DEMO' });
+                  const fallback = incidents.find(i => i.status === 'active' || !i.status) || incidents[0] || { id: 'INC-DEMO' };
+                  onSelectIncident(fallback);
                 }
               }}
               onSelectNode={(node) => {
@@ -850,7 +1049,7 @@ export function UserActivityGraphPage({
               <div className="space-y-4 text-xs">
                 {/* Header info */}
                 <div>
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
                     <span className="text-[10px] uppercase font-bold text-slate-400 font-mono">
                       {inspectedNode.type}
                     </span>
@@ -859,12 +1058,32 @@ export function UserActivityGraphPage({
                     }`}>
                       {inspectedNode.risk_level}
                     </span>
+                    {inspectedNode.incident_status && (
+                      <span className={`px-2 py-0.2 text-[9px] uppercase font-bold rounded border ${
+                        inspectedNode.incident_status === 'CONTAINED'
+                          ? 'bg-indigo-950 text-indigo-300 border-indigo-700'
+                          : inspectedNode.incident_status === 'RESOLVED' || inspectedNode.incident_status === 'RECOVERED'
+                          ? 'bg-emerald-950 text-emerald-300 border-emerald-700'
+                          : inspectedNode.incident_status === 'ACKNOWLEDGED'
+                          ? 'bg-amber-950 text-amber-300 border-amber-700'
+                          : 'bg-rose-950 text-rose-300 border-rose-700'
+                      }`}>
+                        STATUS: {inspectedNode.incident_status}
+                      </span>
+                    )}
+                    {inspectedNode.severity && (
+                      <span className="px-2 py-0.2 text-[9px] uppercase font-mono font-bold rounded border bg-slate-950 text-slate-300 border-slate-700">
+                        SEVERITY: {inspectedNode.severity}
+                      </span>
+                    )}
                   </div>
                   <h4 className="text-base font-bold text-white font-mono break-all">
                     {inspectedNode.label}
                   </h4>
-                  <div className="text-[10px] font-mono text-slate-500 break-all mt-0.5">
-                    ID: {inspectedNode.id}
+                  <div className="text-[10px] font-mono text-slate-500 break-all mt-0.5 flex flex-wrap gap-2">
+                    <span>ID: {inspectedNode.id}</span>
+                    {inspectedNode.entity_id && <span>| Entity: {inspectedNode.entity_id}</span>}
+                    {inspectedNode.incident_id && <span className="text-rose-400">| Incident: {inspectedNode.incident_id}</span>}
                   </div>
                 </div>
 
@@ -917,22 +1136,86 @@ export function UserActivityGraphPage({
                   </div>
                 </div>
 
-                {/* Attack-Chain & Incident Linkage (Requirement 7) */}
-                {graphData?.incidents && graphData.incidents.length > 0 && (
+                {/* AI Agent Deep Security Analysis: 10 Diagnostic Answers */}
+                {(inspectedNode.type === 'AI Agent' || inspectedNode.id?.includes('agent')) && (
+                  <div className="p-3.5 bg-fuchsia-950/20 border border-fuchsia-800/50 rounded-xl space-y-2.5 font-sans">
+                    <div className="flex items-center justify-between pb-1.5 border-b border-fuchsia-900/40">
+                      <div className="flex items-center gap-1.5 text-fuchsia-400 font-bold text-xs">
+                        <Bot size={14} />
+                        <span>AI Agent Security Diagnostic (10 Q&A)</span>
+                      </div>
+                      <span className="text-[9px] font-mono uppercase px-1.5 py-0.5 rounded bg-fuchsia-900/50 text-fuchsia-300 border border-fuchsia-700">
+                        First-Class Entity
+                      </span>
+                    </div>
+
+                    <div className="space-y-2 text-[11px]">
+                      <div>
+                        <span className="text-fuchsia-400 font-mono font-bold block text-[10px]">1. WHO OWNS THE AGENT?</span>
+                        <span className="text-slate-300">U_ANALYST (Role: Standard Analyst, Scope: hr_copilot)</span>
+                      </div>
+                      <div>
+                        <span className="text-fuchsia-400 font-mono font-bold block text-[10px]">2. WHAT DOES THE AGENT NORMALLY DO?</span>
+                        <span className="text-slate-300">Queries employee directory, policy docs, benefits. Baseline tools: [hr_directory_lookup, policy_retrieval].</span>
+                      </div>
+                      <div>
+                        <span className="text-fuchsia-400 font-mono font-bold block text-[10px]">3. WHAT DID IT DO THIS TIME?</span>
+                        <span className="text-white font-medium">Invoked privileged tool raw_sql_exec to access customer credentials and payroll DB.</span>
+                      </div>
+                      <div>
+                        <span className="text-fuchsia-400 font-mono font-bold block text-[10px]">4. WHICH TOOL DID IT USE?</span>
+                        <span className="text-rose-300 font-mono font-bold">raw_sql_exec (Restricted Administrative Tool)</span>
+                      </div>
+                      <div>
+                        <span className="text-fuchsia-400 font-mono font-bold block text-[10px]">5. WHICH API DID IT CALL?</span>
+                        <span className="text-amber-300 font-mono font-bold">/api/v1/customer_credentials/export</span>
+                      </div>
+                      <div>
+                        <span className="text-fuchsia-400 font-mono font-bold block text-[10px]">6. WHICH RESOURCE DID IT ACCESS?</span>
+                        <span className="text-rose-300 font-mono font-bold">Customer DB / PII Store (High Sensitivity)</span>
+                      </div>
+                      <div>
+                        <span className="text-fuchsia-400 font-mono font-bold block text-[10px]">7. WHY WAS IT ABNORMAL?</span>
+                        <span className="text-slate-300">{inspectedNode.reasons?.join('; ') || 'Restricted tool execution outside declared baseline profile.'}</span>
+                      </div>
+                      <div>
+                        <span className="text-fuchsia-400 font-mono font-bold block text-[10px]">8. WHAT RISK SIGNALS WERE DETECTED?</span>
+                        <div className="flex flex-wrap gap-1 mt-0.5">
+                          {(inspectedNode.signals?.length > 0 ? inspectedNode.signals : ['agent_restricted_tool_usage', 'agent_sensitive_data_access']).map((s, i) => (
+                            <span key={i} className="text-[9px] font-mono px-1 py-0.5 rounded bg-rose-950 border border-rose-800 text-rose-300">
+                              {s}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-fuchsia-400 font-mono font-bold block text-[10px]">9. WHAT IS THE RISK SCORE?</span>
+                        <span className="text-white font-mono font-bold">85/100 (HIGH-RISK) — Explainable contribution breakdown.</span>
+                      </div>
+                      <div>
+                        <span className="text-fuchsia-400 font-mono font-bold block text-[10px]">10. WHAT IS THE ATTACK CHAIN?</span>
+                        <span className="text-cyan-300 font-mono text-[10px] break-all">HR_Agent → raw_sql_exec → /api/v1/customer_credentials/export → Customer DB</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Attack-Chain & Incident Linkage (Correlated strictly with inspected entity) */}
+                {linkedIncident && (
                   <div className="p-3 bg-rose-950/30 border border-rose-800/50 rounded-xl space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] uppercase font-bold text-rose-300 flex items-center gap-1">
                         <Flame size={12} /> Correlated Incident Link
                       </span>
                       <span className="text-[10px] font-mono font-bold text-rose-200">
-                        Score: {graphData.incidents[0].risk_score}/100
+                        Score: {linkedIncident.risk_score ?? linkedIncident.risk_assessment?.risk_score ?? 0}/100
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-300">
-                      Connected to incident <strong className="text-white font-mono">{graphData.incidents[0].id}</strong>.
+                      Connected to incident <strong className="text-white font-mono">{linkedIncident.id}</strong> ({linkedIncident.status?.toUpperCase() || 'ACTIVE'}).
                     </p>
                     <button
-                      onClick={() => onSelectIncident && onSelectIncident({ id: graphData.incidents[0].id })}
+                      onClick={() => onSelectIncident && onSelectIncident(linkedIncident)}
                       className="w-full mt-1 px-3 py-1.5 bg-rose-900/60 hover:bg-rose-900 border border-rose-700 text-rose-100 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center justify-center gap-1.5"
                     >
                       <span>Open Incident Attack Chain</span>

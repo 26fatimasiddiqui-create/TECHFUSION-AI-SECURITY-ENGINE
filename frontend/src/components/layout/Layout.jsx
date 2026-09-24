@@ -22,16 +22,18 @@ export function Layout({
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <Header 
-          onRefresh={onRefresh} 
-          isRefreshing={isRefreshing} 
-          onRunDemo={onRunDemo} 
-          alertCount={alertCount}
-          onOpenAlerts={() => setTab('alerts')}
-        />
+        {currentTab !== 'insight' && (
+          <Header 
+            onRefresh={onRefresh} 
+            isRefreshing={isRefreshing} 
+            onRunDemo={onRunDemo} 
+            alertCount={alertCount}
+            onOpenAlerts={() => setTab('alerts')}
+          />
+        )}
         
-        <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 bg-slate-50 dark:bg-[#0b0f19] transition-colors">
-          <div className="max-w-7xl mx-auto">
+        <main className={`flex-1 overflow-y-auto ${currentTab === 'insight' ? 'p-0 bg-slate-50 dark:bg-slate-950' : 'p-4 sm:p-6 lg:p-8 bg-slate-50 dark:bg-[#0b0f19]'} transition-colors duration-200`}>
+          <div className={currentTab === 'insight' ? 'w-full' : 'max-w-7xl mx-auto'}>
             {children}
           </div>
         </main>

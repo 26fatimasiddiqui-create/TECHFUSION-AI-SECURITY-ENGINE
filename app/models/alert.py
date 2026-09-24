@@ -34,6 +34,7 @@ class SecurityAlert(BaseModel):
     response_state: Optional[str] = None
     recommended_actions: List[str] = Field(default_factory=list)
     affected_entity: Optional[str] = None
+    primary_entity: Optional[str] = None
 
     # Convenience aliases
     @property

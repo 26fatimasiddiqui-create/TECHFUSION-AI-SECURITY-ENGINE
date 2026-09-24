@@ -116,6 +116,7 @@ class ApprovalState(str, Enum):
     EXPIRED = "EXPIRED"
     SIMULATED = "SIMULATED"
     EXECUTED = "EXECUTED"
+    RESOLVED = "RESOLVED"
 
 
 class ApproverRole(str, Enum):

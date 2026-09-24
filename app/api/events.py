@@ -95,6 +95,7 @@ async def ingest_event(
         correlated_event_count=len(incident.events),
     )
     incident.risk_assessment = assessment
+    await repo.save_incident(incident)
 
     # Store context into Cognee
     await cognee_svc.store_event_context(persisted_event)

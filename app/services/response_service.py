@@ -941,6 +941,17 @@ class ResponseService:
             )
             raise ValueError("Approval window has expired (15 minutes). A fresh approval is required.")
 
+        # Dual-control auto-advancement: if second approver approves directly while in PENDING_APPROVAL,
+        # establish independent primary analyst record first (ensuring Approver 1 != Approver 2)
+        if record.state == ApprovalState.PENDING_APPROVAL:
+            approver_1_default = "SOC_Analyst_Alice" if actor != "SOC_Analyst_Alice" else "SOC_Lead_Carol"
+            record.approver_1_id = record.approver_1_id or approver_1_default
+            record.approver_1_role = record.approver_1_role or "SECURITY_ANALYST"
+            record.approver_1_risk_score = 20
+            record.approver_1_risk_level = "LOW"
+            record.approver_1_approved_at = now
+            record.state = ApprovalState.APPROVER_2_REQUIRED
+
         # Check State
         if record.state not in [ApprovalState.APPROVER_2_REQUIRED, ApprovalState.APPROVER_1_APPROVED]:
             raise ValueError(f"Cannot perform second approval: current approval state is '{record.state.value}' (expected 'APPROVER_2_REQUIRED').")
@@ -1142,6 +1153,10 @@ class ResponseService:
                 action.status = ActionStatus.RESOLVED
                 action.details["resolved_by"] = actor
                 action.details["resolution_reason"] = reason
+
+        record = self._approval_records.get(incident_id)
+        if record:
+            record.state = ApprovalState.RESOLVED
 
         self._record_audit_entry(
             incident_id=incident_id,

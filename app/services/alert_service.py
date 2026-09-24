@@ -108,10 +108,58 @@ class AlertService:
         "CRITICAL": "Simulated Action: Human approval required / suspend and isolate affected action.",
     }
 
-    def __init__(self, repo: Optional[SupabaseRepository] = None, response_svc: Optional[Any] = None):
+    def __init__(
+        self,
+        repo: Optional[SupabaseRepository] = None,
+        response_svc: Optional[Any] = None,
+        correlation_svc: Optional[Any] = None,
+    ):
         self.repo = repo
         self.response_svc = response_svc
+        self.correlation_svc = correlation_svc
         self._memory_alerts: Dict[str, SecurityAlert] = {}
+
+    def _sync_alert_with_incident(self, alert: SecurityAlert) -> SecurityAlert:
+        """Synchronizes alert status, risk level, risk score, and title with its authoritative incident."""
+        if not alert.incident_id:
+            return alert
+
+        inc = None
+        if self.correlation_svc:
+            inc = self.correlation_svc.get_incident(alert.incident_id)
+
+        if inc:
+            inc_status = (inc.status or "active").lower()
+            inc_score = None
+            if inc.risk_assessment and inc.risk_assessment.risk_score is not None:
+                inc_score = inc.risk_assessment.risk_score
+            elif hasattr(inc, "risk_score") and inc.risk_score is not None:
+                inc_score = inc.risk_score
+
+            if inc_status in ["resolved", "recovered"] or inc_score == 0:
+                alert.status = "resolved"
+                alert.risk_score = 0
+                alert.risk_level = "RESOLVED"
+                alert.approval_state = "RESOLVED"
+                alert.response_state = "RESTORED"
+                alert.acknowledged = True
+                alert.title = f"Security Alert: Resolved - {alert.primary_entity or 'Entity'}"
+                alert.message = f"Resolved security incident: {alert.threat_type} affecting '{alert.primary_entity}'. Risk score 0/100 [RESOLVED]."
+            elif inc_status == "contained" or (inc_score is not None and inc_score <= 25 and inc_status != "active"):
+                alert.status = "contained"
+                alert.risk_score = inc_score if inc_score is not None else 15
+                alert.risk_level = "LOW"
+                alert.approval_state = "APPROVED"
+                alert.response_state = "CONTAINMENT_ACTIVE"
+                alert.acknowledged = True
+                alert.title = f"Security Alert: Contained - Low ({alert.primary_entity or 'Entity'})"
+                alert.message = f"Contained security incident: {alert.threat_type} affecting '{alert.primary_entity}'. Risk score {alert.risk_score}/100 [CONTAINMENT ACTIVE]."
+            elif inc_status == "acknowledged":
+                alert.acknowledged = True
+                alert.status = "acknowledged"
+
+            self._memory_alerts[alert.alert_id] = alert
+        return alert
 
     def should_generate_alert(self, risk_assessment: RiskAssessment) -> bool:
         """Determines if the assessed risk warrants creating a security alert."""
@@ -333,6 +381,10 @@ class AlertService:
         acknowledged: Optional[bool] = None,
     ) -> List[SecurityAlert]:
         """Lists alerts with optional risk_level, status, and acknowledgement filtering."""
+        # Synchronize memory alerts with current incident state
+        for a in list(self._memory_alerts.values()):
+            self._sync_alert_with_incident(a)
+
         results = list(self._memory_alerts.values())
         if self.repo:
             repo_alerts = await self.repo.list_alerts(limit=limit, risk_level=risk_level, status=status)
@@ -340,6 +392,7 @@ class AlertService:
                 # Merge into memory alerts prioritizing memory state
                 for ra in repo_alerts:
                     if ra.alert_id not in self._memory_alerts:
+                        self._sync_alert_with_incident(ra)
                         self._memory_alerts[ra.alert_id] = ra
                 results = list(self._memory_alerts.values())
 
@@ -362,6 +415,13 @@ class AlertService:
             if new_status == "acknowledged":
                 alert.acknowledged = True
                 alert.acknowledged_at = datetime.now(timezone.utc)
+            elif new_status == "resolved":
+                alert.acknowledged = True
+                alert.acknowledged_at = datetime.now(timezone.utc)
+                alert.risk_score = 0
+                alert.risk_level = "RESOLVED"
+                alert.approval_state = "RESOLVED"
+                alert.response_state = "RESTORED"
             self._memory_alerts[alert.alert_id] = alert
             if self.repo:
                 await self.repo.save_alert(alert)
@@ -449,19 +509,199 @@ class AlertService:
         return alert
 
     async def get_active_critical_alert(self) -> Optional[SecurityAlert]:
-        """Finds the most recent unacknowledged CRITICAL alert for prominent banner display."""
-        critical_alerts = [
-            a for a in self._memory_alerts.values()
-            if a.risk_level == "CRITICAL" and not a.acknowledged and a.status != "resolved"
-        ]
-        if not critical_alerts:
-            # Fall back to any active critical alert
-            critical_alerts = [
-                a for a in self._memory_alerts.values()
-                if a.risk_level == "CRITICAL" and a.status != "resolved"
-            ]
-        if critical_alerts:
-            critical_alerts.sort(key=lambda a: a.timestamp, reverse=True)
-            return critical_alerts[0]
+        """Finds the most recent unacknowledged CRITICAL alert whose associated incident is currently active and requires critical operator attention.
+        Must NOT return alerts for resolved, contained, mitigated, or recovered incidents, or alerts with risk score <= 25.
+        """
+        # Synchronize memory alerts with current incident state
+        for a in list(self._memory_alerts.values()):
+            self._sync_alert_with_incident(a)
+
+        active_critical = []
+        for a in self._memory_alerts.values():
+            if a.status in ["resolved", "contained", "mitigated", "recovered"]:
+                continue
+            if a.approval_state in ["APPROVED", "RESOLVED"]:
+                continue
+            if a.acknowledged:
+                continue
+            if a.risk_score is not None and a.risk_score <= 25:
+                continue
+            if (a.risk_level or "").upper() != "CRITICAL" and (a.risk_score or 0) < 80:
+                continue
+
+            # Verify associated incident state if linked
+            if a.incident_id and self.correlation_svc:
+                inc = self.correlation_svc.get_incident(a.incident_id)
+                if inc:
+                    if inc.status in ["resolved", "contained", "mitigated", "recovered"]:
+                        continue
+                    if inc.risk_assessment and inc.risk_assessment.risk_score <= 25:
+                        continue
+
+            active_critical.append(a)
+
+        if active_critical:
+            active_critical.sort(key=lambda a: a.timestamp, reverse=True)
+            return active_critical[0]
         return None
+
+    async def resolve_alerts_for_incident(
+        self,
+        incident_id: str,
+        new_status: str = "contained",
+        risk_score: int = 15,
+        risk_level: str = "LOW",
+        approval_state: str = "APPROVED",
+        response_state: str = "CONTAINMENT_ACTIVE",
+    ) -> List[SecurityAlert]:
+        """Resolves or contains all alerts strictly associated with an incident when containment or recovery is completed."""
+        if not incident_id:
+            return []
+        updated = []
+        for alert in list(self._memory_alerts.values()):
+            if alert.incident_id and alert.incident_id == incident_id:
+                alert.status = new_status
+                alert.risk_score = risk_score
+                alert.risk_level = risk_level
+                alert.approval_state = approval_state
+                alert.response_state = response_state
+                if new_status in ["contained", "resolved"]:
+                    alert.acknowledged = True
+                    alert.acknowledged_at = datetime.now(timezone.utc)
+                entity_name = getattr(alert, "affected_entity", None) or getattr(alert, "primary_entity", None) or "Entity"
+                threat = alert.threat_type or "Threat"
+                if new_status == "contained":
+                    alert.title = f"Security Alert: Contained - Low ({entity_name})"
+                    alert.message = f"Contained security incident: {threat} affecting '{entity_name}'. Risk score {risk_score}/100 [CONTAINMENT ACTIVE]."
+                elif new_status == "resolved":
+                    alert.title = f"Security Alert: Resolved - {entity_name}"
+                    alert.message = f"Resolved security incident: {threat} affecting '{entity_name}'. Risk score 0/100 [RESOLVED]."
+                self._memory_alerts[alert.alert_id] = alert
+                if self.repo:
+                    try:
+                        await self.repo.save_alert(alert)
+                    except Exception as e:
+                        logger.error(f"Failed to persist alert status update: {e}")
+                updated.append(alert)
+        return updated
+
+    async def resolve_single_alert(
+        self,
+        alert_id: str,
+        reason: str = "Resolved by SOC Operator",
+        actor: str = "SOC_Analyst",
+    ) -> Optional[SecurityAlert]:
+        """Resolves a single security alert without auto-resolving unrelated alerts."""
+        alert = await self.get_alert(alert_id)
+        if not alert:
+            return None
+
+        alert.status = "resolved"
+        alert.acknowledged = True
+        alert.acknowledged_at = datetime.now(timezone.utc)
+        alert.acknowledged_by = actor
+        alert.risk_score = 0
+        alert.risk_level = "RESOLVED"
+        alert.approval_state = "RESOLVED"
+        alert.response_state = "RESTORED"
+        self._memory_alerts[alert.alert_id] = alert
+
+        if self.repo:
+            try:
+                await self.repo.save_alert(alert)
+            except Exception as e:
+                logger.error(f"Failed to persist resolved alert {alert_id}: {e}")
+
+        # If this alert is linked to an incident, check if other active alerts exist for it
+        if alert.incident_id and self.response_svc:
+            other_active_alerts = [
+                a for a in self._memory_alerts.values()
+                if a.incident_id == alert.incident_id and a.alert_id != alert.alert_id and a.status != "resolved"
+            ]
+            if not other_active_alerts:
+                try:
+                    self.response_svc.recover_false_positive(
+                        incident_id=alert.incident_id,
+                        reason=reason,
+                        actor=actor,
+                    )
+                except Exception as e:
+                    logger.debug(f"Incident recovery notice: {e}")
+
+            self.response_svc._record_audit_entry(
+                incident_id=alert.incident_id,
+                action="ALERT_RESOLVED",
+                target=alert.alert_id,
+                target_type="alert",
+                risk_score=0,
+                severity="RESOLVED",
+                reason=f"Operator '{actor}' resolved alert {alert.alert_id}: {reason}.",
+                status="RESOLVED",
+                actor=actor,
+                details={
+                    "alert_id": alert.alert_id,
+                    "resolution_reason": reason,
+                    "incident_id": alert.incident_id,
+                },
+            )
+
+        return alert
+
+    async def resolve_alerts_for_user(
+        self,
+        user_id: str,
+        new_status: str = "resolved",
+        risk_score: int = 0,
+        risk_level: str = "RESOLVED",
+        approval_state: str = "APPROVED",
+        response_state: str = "RESTORED",
+        actor: str = "SOC_Analyst",
+        reason: str = "User threats cleared and synchronized by analyst",
+    ) -> List[SecurityAlert]:
+        """Resolves or contains all security alerts across the system for a specific user upon approval/update."""
+        if not user_id:
+            return []
+        uid_clean = str(user_id).strip().lower()
+        updated = []
+        for alert in list(self._memory_alerts.values()):
+            matches = False
+            for attr in ["primary_entity", "affected_entity", "user_id"]:
+                val = getattr(alert, attr, None)
+                if val and str(val).strip().lower() == uid_clean:
+                    matches = True
+                    break
+            if not matches:
+                # Check alert message or title for employee name or code
+                msg = (alert.message or "") + " " + (alert.title or "")
+                if uid_clean in msg.lower():
+                    matches = True
+
+            if matches:
+                alert.status = new_status
+                alert.acknowledged = True
+                alert.acknowledged_at = datetime.now(timezone.utc)
+                alert.acknowledged_by = actor
+                alert.risk_score = risk_score
+                alert.risk_level = risk_level
+                alert.approval_state = approval_state
+                alert.response_state = response_state
+                entity_name = getattr(alert, "affected_entity", None) or getattr(alert, "primary_entity", None) or user_id
+                threat = alert.threat_type or "Threat"
+                if new_status == "contained":
+                    alert.title = f"Security Alert: Contained - Low ({entity_name})"
+                    alert.message = f"Contained security incident: {threat} affecting '{entity_name}'. Risk score {risk_score}/100 [CONTAINMENT ACTIVE]."
+                elif new_status == "resolved":
+                    alert.title = f"Security Alert: Resolved - {entity_name}"
+                    alert.message = f"Resolved security incident: {threat} affecting '{entity_name}'. Risk score 0/100 [RESOLVED]."
+
+                self._memory_alerts[alert.alert_id] = alert
+                if self.repo:
+                    try:
+                        await self.repo.save_alert(alert)
+                    except Exception as e:
+                        logger.error(f"Failed to persist alert {alert.alert_id}: {e}")
+                updated.append(alert)
+
+        return updated
+
 

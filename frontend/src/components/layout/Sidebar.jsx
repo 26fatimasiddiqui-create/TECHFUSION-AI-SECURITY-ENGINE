@@ -1,13 +1,13 @@
 import React from 'react';
 import { 
   ShieldAlert, 
-  LayoutDashboard, 
   Activity, 
   Flame, 
   Cpu, 
   Bell, 
   Network,
-  Globe
+  Globe,
+  LayoutDashboard
 } from 'lucide-react';
 import { useMode } from '../../context/ModeContext';
 
@@ -15,7 +15,8 @@ export function Sidebar({ currentTab, setTab, alertCount = 0 }) {
   const { isEasyMode } = useMode();
 
   const navItems = [
-    { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+    { id: 'insight', label: 'INSIGHT Threat Monitor', icon: ShieldAlert, badge: 'PRO' },
+    { id: 'easy-dashboard', label: 'Easy Dashboard', icon: LayoutDashboard },
     { id: 'internal-threats', label: 'Internal Threats', icon: ShieldAlert },
     { id: 'external-threats', label: 'External Threats', icon: Globe },
     { id: 'events', label: 'Live Events', icon: Activity },

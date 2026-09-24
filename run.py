@@ -69,6 +69,17 @@ def check_frontend_dependencies():
         print_colored("[SUCCESS] Frontend dependencies installed.", GREEN)
 
 
+def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """Check if a network port is already open or bound by a process."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            return s.connect_ex((host, port)) == 0
+    except Exception:
+        return False
+
+
 def wait_for_service(url: str, timeout_sec: int = 30) -> bool:
     """Wait until a service responds at url."""
     start_time = time.time()
@@ -122,50 +133,57 @@ def main():
     check_python_dependencies()
     check_frontend_dependencies()
 
-    # Step 2: Start Backend (FastAPI via Uvicorn)
-    print_colored("[1/2] Starting FastAPI Backend on http://127.0.0.1:8000...", CYAN)
-    backend_env = os.environ.copy()
-    backend_env["PYTHONUNBUFFERED"] = "1"
+    # Step 2: Start Backend (FastAPI via Uvicorn) if not already running
+    backend_proc = None
+    if is_port_in_use(8000) or wait_for_service("http://127.0.0.1:8000/health", timeout_sec=1):
+        print_colored("[INFO] Backend is already running on http://127.0.0.1:8000", GREEN)
+    else:
+        print_colored("[1/2] Starting FastAPI Backend on http://127.0.0.1:8000...", CYAN)
+        backend_env = os.environ.copy()
+        backend_env["PYTHONUNBUFFERED"] = "1"
 
-    # Start backend in its own process group on POSIX
-    backend_kwargs = {}
-    if sys.platform != "win32":
-        backend_kwargs["preexec_fn"] = os.setsid
+        backend_kwargs = {}
+        if sys.platform != "win32":
+            backend_kwargs["preexec_fn"] = os.setsid
 
-    backend_cmd = [
-        sys.executable,
-        "-m",
-        "uvicorn",
-        "app.main:app",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "8000",
-        "--reload"
-    ]
-    backend_proc = subprocess.Popen(
-        backend_cmd,
-        cwd=str(ROOT_DIR),
-        env=backend_env,
-        **backend_kwargs
-    )
+        backend_cmd = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8000",
+            "--reload"
+        ]
+        backend_proc = subprocess.Popen(
+            backend_cmd,
+            cwd=str(ROOT_DIR),
+            env=backend_env,
+            **backend_kwargs
+        )
 
-    # Step 3: Start Frontend (Vite)
-    print_colored("[2/2] Starting Vite Frontend on http://localhost:3000...", CYAN)
-    npm_cmd = shutil.which("npm") or shutil.which("npm.cmd") or "npm"
-    frontend_kwargs = {}
-    if sys.platform != "win32":
-        frontend_kwargs["preexec_fn"] = os.setsid
+    # Step 3: Start Frontend (Vite) if not already running
+    frontend_proc = None
+    if is_port_in_use(3000) or wait_for_service("http://localhost:3000", timeout_sec=1):
+        print_colored("[INFO] Frontend is already running on http://localhost:3000", GREEN)
+    else:
+        print_colored("[2/2] Starting Vite Frontend on http://localhost:3000...", CYAN)
+        npm_cmd = shutil.which("npm") or shutil.which("npm.cmd") or "npm"
+        frontend_kwargs = {}
+        if sys.platform != "win32":
+            frontend_kwargs["preexec_fn"] = os.setsid
 
-    frontend_proc = subprocess.Popen(
-        [npm_cmd, "run", "dev"],
-        cwd=str(FRONTEND_DIR),
-        **frontend_kwargs
-    )
+        frontend_proc = subprocess.Popen(
+            [npm_cmd, "run", "dev"],
+            cwd=str(FRONTEND_DIR),
+            **frontend_kwargs
+        )
 
     # Step 4: Wait for services to be ready
-    print_colored("[WAIT] Waiting for servers to initialize...", YELLOW)
-    backend_ready = wait_for_service("http://127.0.0.1:8000/health", timeout_sec=20)
+    print_colored("[WAIT] Verifying servers are healthy and responding...", YELLOW)
+    backend_ready = wait_for_service("http://127.0.0.1:8000/api/health", timeout_sec=20)
     frontend_ready = wait_for_service("http://localhost:3000", timeout_sec=20)
 
     print()
@@ -176,7 +194,7 @@ def main():
     print_colored(f"   * Web Dashboard:   {BOLD}http://localhost:3000{RESET}", GREEN)
     print_colored(f"   * Backend API:     {BOLD}http://127.0.0.1:8000{RESET}", GREEN)
     print_colored(f"   * Swagger Docs:    {BOLD}http://127.0.0.1:8000/docs{RESET}", GREEN)
-    print_colored(f"   * Health Status:   {BOLD}http://127.0.0.1:8000/health{RESET}", GREEN)
+    print_colored(f"   * Health Status:   {BOLD}http://127.0.0.1:8000/api/health{RESET}", GREEN)
     print_colored("================================================================", GREEN)
     print_colored("   Opening Web Dashboard in your default browser...", CYAN)
     print_colored("   Press Ctrl+C anytime to stop both servers.", YELLOW)
@@ -189,11 +207,10 @@ def main():
     # Step 6: Monitor processes until interrupted
     try:
         while True:
-            # If any process terminated prematurely, report and exit
-            if backend_proc.poll() is not None:
+            if backend_proc and backend_proc.poll() is not None:
                 print_colored("\n[ERROR] Backend process terminated unexpectedly.", RED)
                 break
-            if frontend_proc.poll() is not None:
+            if frontend_proc and frontend_proc.poll() is not None:
                 print_colored("\n[ERROR] Frontend process terminated unexpectedly.", RED)
                 break
             time.sleep(1)
@@ -201,8 +218,10 @@ def main():
         print_colored("\n[INFO] Shutdown signal received (Ctrl+C). Stopping servers...", YELLOW)
     finally:
         print_colored("[INFO] Cleaning up processes...", CYAN)
-        kill_process_tree(backend_proc)
-        kill_process_tree(frontend_proc)
+        if backend_proc:
+            kill_process_tree(backend_proc)
+        if frontend_proc:
+            kill_process_tree(frontend_proc)
         print_colored("[SUCCESS] All servers stopped cleanly.", GREEN)
 
 

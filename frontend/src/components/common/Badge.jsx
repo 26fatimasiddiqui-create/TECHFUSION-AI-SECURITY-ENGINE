@@ -1,7 +1,17 @@
 import React from 'react';
 
-export function RiskBadge({ level = 'LOW', score = null, className = '' }) {
-  const normLevel = (level || 'LOW').toUpperCase();
+export function RiskBadge({ level, score = null, className = '' }) {
+  let normLevel = (level || '').toUpperCase();
+  if (!normLevel || (normLevel === 'LOW' && score !== null && score >= 30)) {
+    if (score !== null && score !== undefined) {
+      if (score >= 80) normLevel = 'CRITICAL';
+      else if (score >= 60) normLevel = 'HIGH';
+      else if (score >= 30) normLevel = 'MODERATE';
+      else normLevel = 'LOW';
+    } else {
+      normLevel = 'LOW';
+    }
+  }
 
   const styles = {
     LOW: 'bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-700/50 shadow-sm',

@@ -166,6 +166,24 @@ export async function updateAlertStatus(alertId, newStatus) {
 }
 
 /**
+ * Resolve single alert in isolation
+ * POST /api/alerts/{alert_id}/resolve
+ */
+export async function resolveAlert(alertId, payload = {}) {
+  try {
+    const res = await apiClient.post(`/api/alerts/${encodeURIComponent(alertId)}/resolve`, {
+      resolution_reason: payload.resolution_reason || 'Resolved by security analyst',
+      actor: payload.actor || 'analyst',
+      ...payload,
+    });
+    return res.data;
+  } catch (err) {
+    throw new Error(formatApiError(err));
+  }
+}
+
+
+/**
  * Fetch list of tracked users
  * GET /api/users
  */
@@ -311,6 +329,19 @@ export async function secondApproveIncidentResponse(incidentId, payload = {}) {
 }
 
 /**
+ * Synchronize and update user resolution across database, Cognee, and alert engine
+ * POST /api/response/{incident_id}/sync-update
+ */
+export async function syncUpdateUserResolution(incidentId, payload = {}) {
+  try {
+    const res = await apiClient.post(`/api/response/${encodeURIComponent(incidentId)}/sync-update`, payload);
+    return res.data;
+  } catch (err) {
+    throw new Error(formatApiError(err));
+  }
+}
+
+/**
  * Step 6: Acknowledge alert without resolving the underlying incident
  * POST /api/alerts/{alert_id}/acknowledge
  */
@@ -349,6 +380,48 @@ export async function getActiveCriticalAlert() {
   }
 }
 
+/**
+ * AI Agent Deep Security Analysis APIs
+ */
+export async function getTrackedAgents() {
+  try {
+    const res = await apiClient.get('/api/analyze/agents');
+    return res.data?.agents || [];
+  } catch (err) {
+    throw new Error(formatApiError(err));
+  }
+}
+
+export async function getAgentAnalysis(agentId) {
+  try {
+    const res = await apiClient.get(`/api/analyze/agent/${encodeURIComponent(agentId)}`);
+    return res.data;
+  } catch (err) {
+    throw new Error(formatApiError(err));
+  }
+}
+
+/**
+ * External Threat Deep Security Analysis APIs
+ */
+export async function getExternalThreatProfiles() {
+  try {
+    const res = await apiClient.get('/api/analyze/external-threats');
+    return res.data?.sources || [];
+  } catch (err) {
+    throw new Error(formatApiError(err));
+  }
+}
+
+export async function getExternalThreatAnalysis(sourceIp) {
+  try {
+    const res = await apiClient.get(`/api/analyze/external/${encodeURIComponent(sourceIp)}`);
+    return res.data;
+  } catch (err) {
+    throw new Error(formatApiError(err));
+  }
+}
+
 export default {
   getHealth,
   getEvents,
@@ -369,11 +442,16 @@ export default {
   evaluateResponse,
   approveIncidentResponse,
   secondApproveIncidentResponse,
+  syncUpdateUserResolution,
   rejectIncidentResponse,
   recoverFalsePositive,
   getApprovalStatus,
   evaluateApprover,
   getAuditTrail,
+  getTrackedAgents,
+  getAgentAnalysis,
+  getExternalThreatProfiles,
+  getExternalThreatAnalysis,
   formatApiError,
 };
 

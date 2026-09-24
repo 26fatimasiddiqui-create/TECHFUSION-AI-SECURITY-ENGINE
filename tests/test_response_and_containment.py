@@ -423,3 +423,127 @@ class TestApiIntegrationAndN8n:
         assert "dry_run" in res
         assert "approval_required" in res
         assert "action_status" in res
+
+    def test_second_approve_and_recover_updates_linked_alerts(self, client):
+        # 1. Ingest event to trigger critical incident & alert
+        user_id = f"U_SYNC_TEST_{int(datetime.now().timestamp())}"
+        r1 = client.post("/api/events", json={
+            "user_id": user_id,
+            "session_id": "sess_sync_01",
+            "event_type": "data_access",
+            "resource": "/customer-data/pii/export",
+            "metadata": {
+                "ip": "198.51.100.99",
+                "data_exfiltration": True,
+                "outbound_bytes": 2_000_000,
+            }
+        })
+        assert r1.status_code == 201
+        data = r1.json()
+        incident_id = data["incident_id"]
+
+        # Check alert was created
+        r_alerts = client.get("/api/alerts")
+        assert r_alerts.status_code == 200
+        alerts = [a for a in r_alerts.json() if a.get("incident_id") == incident_id]
+        assert len(alerts) > 0
+        alert_id = alerts[0]["alert_id"]
+
+        # Approver 1
+        r_appr1 = client.post(f"/api/response/{incident_id}/approve", json={
+            "actor": "SOC_Analyst_Alice",
+            "role": "SECURITY_ANALYST",
+            "dry_run": True,
+        })
+        assert r_appr1.status_code == 200
+
+        # Approver 2 (Two-Person Rule fulfilled)
+        r_appr2 = client.post(f"/api/response/{incident_id}/second-approve", json={
+            "actor": "SOC_Admin_Bob",
+            "role": "SECURITY_ADMIN",
+            "dry_run": True,
+        })
+        assert r_appr2.status_code == 200
+
+        # Verify alert updated to contained and acknowledged
+        r_after_contain = client.get(f"/api/alerts/{alert_id}")
+        assert r_after_contain.status_code == 200
+        contained_alert = r_after_contain.json()
+        assert contained_alert["status"] == "contained"
+        assert contained_alert["risk_score"] == 15
+        assert contained_alert["acknowledged"] is True
+
+        # Test false positive recovery
+        r_recover = client.post(f"/api/response/{incident_id}/recover", json={
+            "actor": "SOC_Lead",
+            "reason": "Authorized security penetration drill",
+        })
+        assert r_recover.status_code == 200
+
+        # Verify alert updated to resolved
+        r_after_recover = client.get(f"/api/alerts/{alert_id}")
+        assert r_after_recover.status_code == 200
+        resolved_alert = r_after_recover.json()
+        assert resolved_alert["status"] == "resolved"
+        assert resolved_alert["risk_score"] == 0
+
+        # Verify incident itself updated to resolved
+        r_inc = client.get(f"/api/incidents/{incident_id}")
+        assert r_inc.status_code == 200
+        inc_data = r_inc.json()
+        assert inc_data["status"] == "resolved"
+        assert inc_data["risk_assessment"]["risk_score"] == 0
+
+        # Verify approval record is marked RESOLVED
+        r_appr = client.get(f"/api/response/{incident_id}/approval-status")
+        assert r_appr.status_code == 200
+        assert r_appr.json()["state"] == "RESOLVED"
+
+    def test_sync_update_and_cognee_clearance(self, client):
+        """Validates that calling sync-update clears user alerts, updates Cognee baseline, and records audit trail."""
+        # 1. Ingest high-risk event
+        event_payload = {
+            "user_id": "U_COGNEE_SYNC_TEST",
+            "event_type": "database_access",
+            "resource": "/database/customer_credentials/dump",
+            "metadata": {
+                "ip": "203.0.113.199",
+                "bulk_data_access": True,
+                "records_requested": 5000,
+            }
+        }
+        res_ingest = client.post("/api/events", json=event_payload)
+        assert res_ingest.status_code == 201
+        data_ingest = res_ingest.json()
+        incident_id = data_ingest.get("incident_id")
+        assert incident_id is not None
+
+        # 2. Call sync-update endpoint
+        res_sync = client.post(f"/api/response/{incident_id}/sync-update", json={
+            "user_id": "U_COGNEE_SYNC_TEST",
+            "actor": "SOC_Analyst_Carol",
+            "reason": "Approved by analyst and baseline updated"
+        })
+        assert res_sync.status_code == 200
+        data = res_sync.json()
+        assert data["status"] == "success"
+        assert data["cognee_synced"] is True
+        assert data["incident_id"] == incident_id
+
+        # 3. Verify incident is contained
+        res_inc = client.get(f"/api/incidents/{incident_id}")
+        assert res_inc.status_code == 200
+        assert res_inc.json()["status"] == "contained"
+
+        # 4. Verify subsequent event for this user is marked benign by Cognee
+        res_ingest2 = client.post("/api/events", json={
+            "user_id": "U_COGNEE_SYNC_TEST",
+            "event_type": "api_access",
+            "resource": "/api/v1/repos",
+            "metadata": {"ip": "203.0.113.199"}
+        })
+        assert res_ingest2.status_code == 201
+
+
+
+
