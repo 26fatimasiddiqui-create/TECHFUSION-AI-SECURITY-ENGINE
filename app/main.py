@@ -14,7 +14,7 @@ from app.api import (
 )
 
 app = FastAPI(
-    title="TechFusion — Autonomous AI Security & Risk Correlation Platform",
+    title="ThreatFusion — Autonomous AI Security & Risk Correlation Platform",
     description="Enterprise AI-assisted security event correlation, risk-adaptive response, and contextual threat detection API",
     version="1.0.0",
 )

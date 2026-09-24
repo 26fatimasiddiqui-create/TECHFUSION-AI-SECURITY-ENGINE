@@ -230,7 +230,7 @@ export function CriticalIncidentBanner({
             <span>•</span>
             <div className="flex items-center gap-1.5">
               <Server size={14} className="text-purple-600 dark:text-purple-400" />
-              <span>Pipeline: <strong className="text-slate-900 dark:text-slate-200">TechFusion AI Engine</strong></span>
+              <span>Pipeline: <strong className="text-slate-900 dark:text-slate-200">ThreatFusion AI Engine</strong></span>
             </div>
           </div>
         </div>

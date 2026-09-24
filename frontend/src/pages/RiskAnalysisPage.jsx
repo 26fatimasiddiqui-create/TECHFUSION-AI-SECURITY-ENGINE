@@ -270,7 +270,7 @@ export function RiskAnalysisPage() {
               </h1>
             </div>
             <p className="text-xs sm:text-sm text-slate-300 leading-relaxed font-mono flex flex-wrap items-center gap-1.5 pt-1">
-              <span className="text-slate-400 font-sans">Execute real security events through the TechFusion Intelligence Pipeline:</span>
+              <span className="text-slate-400 font-sans">Execute real security events through the ThreatFusion Intelligence Pipeline:</span>
               <span className="text-cyan-400">Detection</span>
               <span className="text-slate-600">→</span>
               <span className="text-blue-400">Correlation</span>

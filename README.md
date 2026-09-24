@@ -1,4 +1,4 @@
-# 🛡️ TechFusion AI Security Engine
+# 🛡️ ThreatFusion AI Security Engine
 ### *INSIGHT Threat Monitor & Autonomous Multi-Step Risk Correlation Platform (PS-8)*
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
@@ -16,7 +16,7 @@ Traditional SIEM and anomaly detectors treat discrete security events in isolati
 
 $$\text{User Login} \longrightarrow \text{Unknown Device} \longrightarrow \text{Sensitive API} \longrightarrow \text{AI Agent Invocation} \longrightarrow \text{Restricted SQL Tool} \longrightarrow \text{Data Exfiltration}$$
 
-**TechFusion AI Security Engine (INSIGHT Threat Monitor)** is an enterprise-grade, explainable security platform designed to detect, track, and remediate multi-stage insider threats, external breaches, and autonomous AI agent anomalies in real time. It monitors **1,000 enterprise employees**, correlates **10,000+ access logs**, plots **interactive geolocation tracks**, and provides **human-in-the-loop SOC approval workflows** with **autonomous synthetic voice dispatch**.
+**ThreatFusion AI Security Engine (INSIGHT Threat Monitor)** is an enterprise-grade, explainable security platform designed to detect, track, and remediate multi-stage insider threats, external breaches, and autonomous AI agent anomalies in real time. It monitors **1,000 enterprise employees**, correlates **10,000+ access logs**, plots **interactive geolocation tracks**, and provides **human-in-the-loop SOC approval workflows** with **autonomous synthetic voice dispatch**.
 
 ---
 
@@ -35,7 +35,7 @@ When presenting this prototype, follow this step-by-step walkthrough to demonstr
 
 ### Step 2: Employee Geolocation Track & Map View
 - **What to show:** In the **Monitored Employees Table**, locate any high-risk employee (e.g. *Aditya Joshi* or *Rajesh Kumar*) and click the **🗺️ Map Icon**.
-- **What to say:** *"TechFusion analyzes IP access logs and correlates geo-velocity. Clicking the Map View opens an interactive Leaflet dark-mode world map plotting the employee's chronological access sequence across cities (e.g. Bangalore -> Pune -> Mumbai) and flags impossible travel or foreign IP anomalies (e.g. Singapore/Dubai)."*
+- **What to say:** *"ThreatFusion analyzes IP access logs and correlates geo-velocity. Clicking the Map View opens an interactive Leaflet dark-mode world map plotting the employee's chronological access sequence across cities (e.g. Bangalore -> Pune -> Mumbai) and flags impossible travel or foreign IP anomalies (e.g. Singapore/Dubai)."*
 - **Key Highlights:** Color-coded polylines by risk level, clickable waypoint markers, and an interactive timestamped audit timeline.
 
 ### Step 3: SOC Action Center & Two-Person Rule Approval
@@ -280,8 +280,7 @@ pytest tests/ -v
 
 ## 👥 Team & Hackathon Submission
 
-- **Repository**: [https://github.com/26fatimasiddiqui-create/TECHFUSION-AI-SECURITY-ENGINE](https://github.com/26fatimasiddiqui-create/TECHFUSION-AI-SECURITY-ENGINE)
 - **Problem Statement**: PS-8 (AI-Assisted Security Monitoring & Multi-Step Risk Correlation Engine)
 - **Developed for**: Hackathon 2026
 
-*TechFusion: Empowering modern SOC teams with explainable AI, human-in-the-loop governance, and autonomous threat correlation.*
+*ThreatFusion: Empowering modern SOC teams with explainable AI, human-in-the-loop governance, and autonomous threat correlation.*

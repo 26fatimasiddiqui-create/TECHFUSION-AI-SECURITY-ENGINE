@@ -165,7 +165,7 @@ export function App() {
       incidentsRes.status === 'rejected' &&
       alertsRes.status === 'rejected'
     ) {
-      setGlobalError('Unable to connect to the TechFusion FastAPI backend. Ensure the backend server is running.');
+      setGlobalError('Unable to connect to the ThreatFusion FastAPI backend. Ensure the backend server is running.');
     }
 
     setIsLoading(false);

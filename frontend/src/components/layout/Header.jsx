@@ -47,7 +47,7 @@ export function Header({ onRefresh, isRefreshing, onRunDemo, alertCount = 0, onO
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-2">
           <div className="text-sm font-bold text-slate-900 dark:text-white tracking-wide flex items-center gap-2">
-            <span className="text-cyan-600 dark:text-cyan-400 font-mono font-extrabold">TechFusion</span>
+            <span className="text-cyan-600 dark:text-cyan-400 font-mono font-extrabold">ThreatFusion</span>
             <span className="text-slate-500 dark:text-slate-400 font-normal hidden sm:inline">Autonomous AI SOC</span>
           </div>
         </div>

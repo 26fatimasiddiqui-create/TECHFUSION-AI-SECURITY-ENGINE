@@ -38,7 +38,7 @@ export function Sidebar({ currentTab, setTab, alertCount = 0 }) {
         <div className="min-w-0 flex-1">
           <div className="font-extrabold text-slate-900 dark:text-white tracking-wider text-sm flex items-center gap-1.5 font-mono">
             <span className="bg-gradient-to-r from-cyan-600 via-sky-600 to-amber-600 dark:from-cyan-400 dark:via-sky-300 dark:to-amber-300 bg-clip-text text-transparent font-black tracking-widest text-[15px]">
-              TECHFUSION
+              THREATFUSION
             </span>
           </div>
           <p className="text-[9.5px] text-slate-500 dark:text-slate-400 tracking-tight font-medium uppercase truncate">

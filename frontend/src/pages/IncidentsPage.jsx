@@ -606,7 +606,7 @@ export function IncidentsPage({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `TechFusion_Incident_Report_${inc.id}.json`;
+    a.download = `ThreatFusion_Incident_Report_${inc.id}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };

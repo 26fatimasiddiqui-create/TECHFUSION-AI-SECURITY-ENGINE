@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TechFusion — Autonomous AI Security & Risk Correlation Platform
+ThreatFusion — Autonomous AI Security & Risk Correlation Platform
 Unified Runner Script: Starts FastAPI backend & Vite frontend, opens web browser, and handles clean shutdown.
 """
 
@@ -188,7 +188,7 @@ def main():
 
     print()
     print_colored("================================================================", GREEN)
-    print_colored("   TechFusion Security Platform is Running!                    ", BOLD + GREEN)
+    print_colored("   ThreatFusion Security Platform is Running!                  ", BOLD + GREEN)
     print_colored("   Tagline: Secure Today • Stronger Tomorrow                   ", CYAN)
     print_colored("================================================================", GREEN)
     print_colored(f"   * Web Dashboard:   {BOLD}http://localhost:3000{RESET}", GREEN)

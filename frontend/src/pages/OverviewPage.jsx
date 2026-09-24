@@ -259,7 +259,7 @@ export function OverviewPage({
         <div className="max-w-3xl">
           <div className="inline-flex items-center gap-2 px-2.5 py-1 bg-cyan-950/80 border border-cyan-800/50 rounded-md text-xs font-mono text-cyan-400 mb-3">
             <Radio size={13} className="text-cyan-400" />
-            TECHFUSION AI SECURITY ENGINE ACTIVE • PRO SOC MODE
+            THREATFUSION AI SECURITY ENGINE ACTIVE • PRO SOC MODE
           </div>
           <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
             Security Monitoring & Multi-Step Risk Assessment
