@@ -101,15 +101,7 @@ export function InsightRiskOverview({ employees = [] }) {
               </PieChart>
             </ResponsiveContainer>
 
-            {/* Central Donut Counter */}
-            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-              <span className="text-2xl font-black font-mono text-slate-900 dark:text-white">
-                {counts.CRITICAL + counts.HIGH}
-              </span>
-              <span className="text-[9px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                Elevated
-              </span>
-            </div>
+
           </div>
 
           {/* Breakdown Pills List */}
